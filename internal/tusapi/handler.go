@@ -72,8 +72,9 @@ type Finalizer interface {
 }
 
 // Verifier authenticates a request's Authorization header (*auth.Verifier).
+// Errors wrap auth.ErrUnauthenticated (401) or auth.ErrUnavailable (503).
 type Verifier interface {
-	VerifyHeader(header string) (string, error)
+	VerifyHeader(ctx context.Context, header string) (string, error)
 }
 
 // Config configures one tus endpoint.
@@ -160,6 +161,9 @@ var (
 	}
 	errInternal     = tusError(http.StatusInternalServerError, "ERR_INTERNAL", "internal error")
 	errShuttingDown = tusError(http.StatusServiceUnavailable, "ERR_SERVER_SHUTDOWN", "server shutting down")
+	// errAuthUnavailable: the device key could not be looked up (database
+	// down); the client retries like for any 503.
+	errAuthUnavailable = tusError(http.StatusServiceUnavailable, "ERR_AUTH_UNAVAILABLE", "authentication temporarily unavailable")
 	errLocked       = tusError(http.StatusLocked, "ERR_UPLOAD_LOCKED", "upload is locked")
 )
 

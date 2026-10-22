@@ -58,7 +58,7 @@ const h3FallbackAfter = 3
 type Config struct {
 	Protocol    string        // rest | rest-http3 | grpc | grpc-native
 	URL         string        // https://host:port (tus) or host:port / https://host:port (gRPC)
-	Token       string        // device JWT
+	Token       string        // device token {device_id}_{key}
 	Device      string        // device_id
 	Priority    int           // 1–4
 	Chunk       int           // bytes per chunk

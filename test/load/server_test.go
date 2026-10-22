@@ -23,6 +23,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/resyahrial/sensor-upload-server/internal/auth"
 	"github.com/resyahrial/sensor-upload-server/internal/db"
 )
 
@@ -39,7 +40,11 @@ type server struct {
 	Native string // 127.0.0.1:port of the native gRPC listener
 	ObjDir string
 	Repo   *db.Repo
+	Keys   *db.DeviceKeys
 	PID    int
+
+	tokensMu sync.Mutex
+	tokens   map[string]string // device -> token (one key per device)
 
 	cmd  *exec.Cmd
 	done chan struct{}
@@ -92,10 +97,7 @@ func startServer(t *testing.T) *server {
 		"DATABASE_URL":       testDSN,
 		"STAGING_DIR":        filepath.Join(dir, "staging"),
 		"OBJSTORE_LOCAL_DIR": s.ObjDir,
-		"DEV_MODE":           "true",
 		"LOG_LEVEL":          "warn",
-		"JWT_ALGS":           "HS256",
-		"JWT_HMAC_SECRET":    hmacSecret,
 		"MAX_FILE_BYTES":     strconv.FormatInt(max(cfg.FileSize, 500<<20), 10),
 		"SHUTDOWN_TIMEOUT":   "10s",
 		// The developer's disk may be past 85%: no disk-pressure deletes
@@ -130,7 +132,31 @@ func startServer(t *testing.T) *server {
 	}
 	t.Cleanup(pool.Close)
 	s.Repo = db.NewRepo(pool)
+	s.Keys = db.NewDeviceKeys(pool)
 	return s
+}
+
+// token returns the device token for device, storing a new key in
+// device_keys on the first call (later calls reuse it).
+func (s *server) token(ctx context.Context, device string) (string, error) {
+	s.tokensMu.Lock()
+	defer s.tokensMu.Unlock()
+	if tok, ok := s.tokens[device]; ok {
+		return tok, nil
+	}
+	key, err := auth.GenerateKey()
+	if err != nil {
+		return "", err
+	}
+	if err := s.Keys.Set(ctx, device, auth.HashKey(key)); err != nil {
+		return "", err
+	}
+	if s.tokens == nil {
+		s.tokens = map[string]string{}
+	}
+	tok := auth.FormatToken(device, key)
+	s.tokens[device] = tok
+	return tok, nil
 }
 
 func (s *server) waitReady() error {

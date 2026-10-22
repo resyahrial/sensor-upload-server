@@ -35,10 +35,7 @@ import (
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 )
 
-const (
-	postgresImage = "docker.io/library/postgres:16-alpine"
-	hmacSecret    = "load-test-secret-0123456789abcdefghij"
-)
+const postgresImage = "docker.io/library/postgres:16-alpine"
 
 // Set up once in TestMain.
 var (

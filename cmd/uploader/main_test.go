@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -31,7 +32,15 @@ func TestParseFlags(t *testing.T) {
 		t.Fatalf("defaults %+v", d.cfg)
 	}
 
-	for _, bad := range [][]string{{}, {"-file", "a", "-dir", "b"}, {"-file", "a", "extra"}, {"-nope"}, {"-file", "a", "-grpc-window", "0"}} {
+	tok := "netem-0001_" + strings.Repeat("ab", 32)
+	if o, err := parseFlags([]string{"-file", "a", "-token", tok}, io.Discard); err != nil || o.cfg.Device != "netem-0001" {
+		t.Fatalf("device from token: %q %v", o.cfg.Device, err)
+	}
+	if o, err := parseFlags([]string{"-file", "a", "-token", tok, "-device", "x-1"}, io.Discard); err != nil || o.cfg.Device != "x-1" {
+		t.Fatalf("explicit -device: %q %v", o.cfg.Device, err)
+	}
+
+	for _, bad := range [][]string{{},{"-file", "a", "-dir", "b"}, {"-file", "a", "extra"}, {"-nope"}, {"-file", "a", "-grpc-window", "0"}} {
 		if _, err := parseFlags(bad, io.Discard); err == nil {
 			t.Errorf("parseFlags(%v): want error", bad)
 		}

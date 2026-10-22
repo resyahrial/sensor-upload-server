@@ -40,14 +40,12 @@ import (
 	"github.com/resyahrial/sensor-upload-server/internal/objstore"
 )
 
-const (
-	postgresImage = "docker.io/library/postgres:16-alpine"
-	hmacSecret    = "e2e-test-secret-0123456789abcdefghij"
-)
+const postgresImage = "docker.io/library/postgres:16-alpine"
 
 // Shared across tests (set up once in TestMain).
 var (
 	testDSN string
+	keys    *db.DeviceKeys // device_keys of the shared database
 	certPEM []byte // self-signed server certificate
 	keyPEM  []byte
 )
@@ -77,6 +75,17 @@ func runMain(m *testing.M) int {
 		fmt.Fprintln(os.Stderr, "postgres dsn:", err)
 		return 1
 	}
+	pool, err := db.Open(ctx, testDSN)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "open database:", err)
+		return 1
+	}
+	defer pool.Close()
+	if err := db.Migrate(ctx, pool); err != nil {
+		fmt.Fprintln(os.Stderr, "migrate:", err)
+		return 1
+	}
+	keys = db.NewDeviceKeys(pool)
 	if certPEM, keyPEM, err = selfSignedCert(); err != nil {
 		fmt.Fprintln(os.Stderr, "certificate:", err)
 		return 1
@@ -131,7 +140,7 @@ func (f *FaultStore) Put(ctx context.Context, key string, r io.Reader, size int6
 
 // Server is a restartable in-process upload server. Env overrides are
 // applied on top of the defaults (local object store, file staging,
-// HS256 dev tokens). The port stays the same across restarts, so upload
+// device keys in the shared database). The port stays the same across restarts, so upload
 // URLs remain valid.
 type Server struct {
 	t     *testing.T
@@ -169,10 +178,7 @@ func StartServer(t *testing.T, env map[string]string) *Server {
 		"DATABASE_URL":       testDSN,
 		"STAGING_DIR":        filepath.Join(dir, "staging"),
 		"OBJSTORE_LOCAL_DIR": filepath.Join(dir, "objects"),
-		"DEV_MODE":           "true",
 		"LOG_LEVEL":          "warn",
-		"JWT_ALGS":           "HS256",
-		"JWT_HMAC_SECRET":    hmacSecret,
 		"MAX_FILE_BYTES":     strconv.Itoa(64 << 20),
 		"SHUTDOWN_TIMEOUT":   "3s",
 		// The temp dir is on the developer's disk, which may well be more
@@ -280,13 +286,46 @@ func (s *Server) GRPCDir() string { return filepath.Join(s.env["STAGING_DIR"], "
 // TusDir is the tus filestore directory.
 func (s *Server) TusDir() string { return filepath.Join(s.env["STAGING_DIR"], "tus") }
 
-// Token returns a valid HS256 device token.
+var (
+	tokensMu sync.Mutex
+	tokens   = map[string]string{} // device -> token issued by Token
+)
+
+// Token returns a valid device token: the first call for a device stores a
+// new key in device_keys (like `devicekey set`), later calls return the
+// same token so that every client of one device stays authenticated.
 func Token(t *testing.T, device string) string {
 	t.Helper()
-	tok, err := auth.Sign(auth.HS256, []byte(hmacSecret), device, time.Now(), time.Hour)
+	tokensMu.Lock()
+	defer tokensMu.Unlock()
+	if tok, ok := tokens[device]; ok {
+		return tok
+	}
+	return setKeyLocked(t, device)
+}
+
+// SetDeviceKey stores a new key for device, replacing (and invalidating)
+// any previous one, and returns its token; Token returns it from now on.
+func SetDeviceKey(t *testing.T, device string) string {
+	t.Helper()
+	tokensMu.Lock()
+	defer tokensMu.Unlock()
+	return setKeyLocked(t, device)
+}
+
+func setKeyLocked(t *testing.T, device string) string {
+	t.Helper()
+	key, err := auth.GenerateKey()
 	if err != nil {
 		t.Fatal(err)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := keys.Set(ctx, device, auth.HashKey(key)); err != nil {
+		t.Fatal(err)
+	}
+	tok := auth.FormatToken(device, key)
+	tokens[device] = tok
 	return tok
 }
 

@@ -89,6 +89,10 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done and merged · `[!]` blocke
 - [x] `wt/vps` (merged): `deploy/vps/` single-VPS stack (server + Postgres + MinIO, IP-only self-signed TLS, ES256), `make vps-secrets / vps-bootstrap / vps-deploy / vps-status / vps-logs / vps-token / vps-tunnel / vps-wipe`. Booted locally under podman: all 4 protocols uploaded. Not yet run against a real VPS (bootstrap and the ssh deploy path are untested).
 - [x] Merge wave 7, gates (build, vet ×4 tags, test, integration 21 packages, lint), squash merge to `master`
 
+## Wave 8 — device-key auth
+- [x] `wt/devicekey` (merged): replace JWT with `Authorization: Bearer {device_id}_{key}` (split at last `_`; SHA-256 of key in Postgres `device_keys`; one active key per device, UPSERT replaces). New `cmd/devicekey` (set/delete/list), `make device-key`, `make vps-device-key`. README: Authentication + Where files are stored sections, feature overview. MQTT rotation is future work.
+- [x] Merge, gates (build, vet ×4 tags, test, integration 21 packages, lint), update `master`. Remote suite 14/14 with device keys.
+
 ## Notes / issues
 - Wave 4 acceptance: the podman VM clock drifted up to 5 h behind the host, causing JWT 401s and MinIO 403s. Fixed by re-stepping the VM clock; documented in the README.
 - Wave 4 B: building the full Dockerfile inside the podman VM gets OOM-killed (2 GB VM, about 520 MB free because of other containers). Image size was verified with cross-compiled binaries in the same distroless stage. HTTP/3 loopback throughput is about 4.5× lower than HTTP/2 (QUIC runs in user space, 2 cores).

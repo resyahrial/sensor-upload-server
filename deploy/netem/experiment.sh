@@ -19,7 +19,8 @@
 #   SIZES [50KB 2MB 20MB]  CHUNKS [64KB 256KB]  REPS [5]   (KB/MB = KiB/MiB)
 #   EXPERIMENT_PARALLEL [4]  RUN_TIMEOUT seconds [7200]  RESULTS_DIR [<repo>/results]
 #   SERVER_URL [https://server:8443]  GRPC_NATIVE_URL [server:9090]
-#   TOKEN (device JWT) [$UPLOADER_TOKEN]  DEVICE [netem-0001]  CA_FILE (host path; empty = -insecure)
+#   TOKEN (device token {device_id}_{key} from `make device-key`) [$UPLOADER_TOKEN]
+#   DEVICE [the token's device_id, else netem-0001]  CA_FILE (host path; empty = -insecure)
 #   UPLOADER_ARGS [-retries 100000 -backoff-max 30s]  (gRPC runs use the uploader's
 #                 default -grpc-window 1; add "-grpc-window N" here only with the
 #                 server's GRPC_ACK_EVERY_N <= N)
@@ -43,6 +44,10 @@ export RESULTS_DIR=${RESULTS_DIR:-$root/results}
 export SERVER_URL=${SERVER_URL:-https://server:8443}
 export GRPC_NATIVE_URL=${GRPC_NATIVE_URL:-server:9090}
 export UPLOADER_TOKEN=${TOKEN:-${UPLOADER_TOKEN:-}}
+# The token is {device_id}_{key} (keys never contain "_").
+if [[ -z ${DEVICE:-} && $UPLOADER_TOKEN == *_* ]]; then
+	DEVICE=${UPLOADER_TOKEN%_*}
+fi
 export DEVICE=${DEVICE:-netem-0001}
 export CA_FILE=${CA_FILE:-}
 export UPLOADER_ARGS=${UPLOADER_ARGS:-"-retries 100000 -backoff-max 30s"}

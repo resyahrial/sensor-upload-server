@@ -14,34 +14,28 @@
 //	REMOTE_CA_FILE       PEM CA or self-signed server certificate to trust
 //	REMOTE_INSECURE=1    skip TLS verification instead (fallback)
 //
-// Device tokens, one of:
+// Device tokens (from `devicekey set -device ID`, README "Authentication"):
 //
-//	REMOTE_HMAC_SECRET + REMOTE_DEVICE   mint HS256 tokens (dev servers with JWT_ALGS incl. HS256)
-//	REMOTE_JWT_KEY + REMOTE_DEVICE       mint ES256 tokens with this PEM P-256 private key
-//	REMOTE_TOKEN [+ REMOTE_DEVICE]       a fixed device JWT (device defaults to its device_id claim)
+//	REMOTE_TOKEN         {device_id}_{key} of the test device (required)
+//	REMOTE_OTHER_TOKEN   token of a second device (optional; the cross-device
+//	                     subtest skips without it)
 //
-// The cross-device test needs a second device: minted ("<device>-other")
-// with a secret/key, or REMOTE_OTHER_TOKEN for a fixed token. Every run
-// uploads fresh random content, so reruns never collide.
+// The device is the token's device_id. Every run uploads fresh random
+// content, so reruns never collide.
 package remote
 
 import (
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/resyahrial/sensor-upload-server/internal/auth"
 )
-
-const tokenTTL = time.Hour
 
 // env is the parsed configuration.
 type env struct {
@@ -51,10 +45,9 @@ type env struct {
 	TLS        *tls.Config
 
 	Device      string
-	OtherDevice string // "" = cross-device test skips
+	OtherDevice string // "" = cross-device subtest skips
 	token       string
 	otherToken  string
-	mint        func(device string) (string, error) // nil with a fixed token
 }
 
 var (
@@ -84,7 +77,6 @@ func loadEnv(getenv func(string) string) (*env, error) {
 		URL:        strings.TrimRight(getenv("REMOTE_URL"), "/"),
 		GRPCNative: getenv("REMOTE_GRPC_NATIVE"),
 		AdminURL:   strings.TrimRight(getenv("REMOTE_ADMIN_URL"), "/"),
-		Device:     getenv("REMOTE_DEVICE"),
 	}
 	if e.URL == "" {
 		return nil, errNoURL
@@ -96,94 +88,37 @@ func loadEnv(getenv func(string) string) (*env, error) {
 	if e.TLS, err = tlsConfig(getenv("REMOTE_CA_FILE"), getenv("REMOTE_INSECURE") == "1"); err != nil {
 		return nil, err
 	}
-
-	secret, keyFile, token := getenv("REMOTE_HMAC_SECRET"), getenv("REMOTE_JWT_KEY"), getenv("REMOTE_TOKEN")
-	switch {
-	case secret != "":
-		e.mint = func(d string) (string, error) {
-			return auth.Sign(auth.HS256, []byte(secret), d, time.Now(), tokenTTL)
-		}
-	case keyFile != "":
-		pem, err := os.ReadFile(keyFile)
-		if err != nil {
-			return nil, fmt.Errorf("REMOTE_JWT_KEY: %w", err)
-		}
-		key, err := auth.ParseES256PrivateKey(pem)
-		if err != nil {
-			return nil, fmt.Errorf("REMOTE_JWT_KEY: %w", err)
-		}
-		e.mint = func(d string) (string, error) { return auth.Sign(auth.ES256, key, d, time.Now(), tokenTTL) }
-	case token != "":
-		e.token = token
-		if e.Device == "" {
-			if e.Device, err = deviceClaim(token); err != nil {
-				return nil, fmt.Errorf("REMOTE_TOKEN: %w (set REMOTE_DEVICE)", err)
-			}
-		}
-		if other := getenv("REMOTE_OTHER_TOKEN"); other != "" {
-			e.otherToken = other
-			if e.OtherDevice, err = deviceClaim(other); err != nil {
-				return nil, fmt.Errorf("REMOTE_OTHER_TOKEN: %w", err)
-			}
-		}
-	default:
-		return nil, errors.New("set REMOTE_HMAC_SECRET, REMOTE_JWT_KEY or REMOTE_TOKEN")
+	if e.token = getenv("REMOTE_TOKEN"); e.token == "" {
+		return nil, errors.New("REMOTE_TOKEN is required (make device-key DEVICE=..., or devicekey set -device ...)")
 	}
-	if e.mint != nil {
-		if e.Device == "" {
-			return nil, errors.New("REMOTE_DEVICE is required with REMOTE_HMAC_SECRET or REMOTE_JWT_KEY")
+	if e.Device, _, err = auth.ParseToken(e.token); err != nil {
+		return nil, fmt.Errorf("REMOTE_TOKEN: %w", err)
+	}
+	if e.otherToken = getenv("REMOTE_OTHER_TOKEN"); e.otherToken != "" {
+		if e.OtherDevice, _, err = auth.ParseToken(e.otherToken); err != nil {
+			return nil, fmt.Errorf("REMOTE_OTHER_TOKEN: %w", err)
 		}
-		e.OtherDevice = e.Device + "-other"
+		if e.OtherDevice == e.Device {
+			return nil, errors.New("REMOTE_OTHER_TOKEN must belong to another device than REMOTE_TOKEN")
+		}
 	}
 	return e, nil
 }
 
-// Token returns a device token for e.Device.
+// Token returns the device token for e.Device.
 func (e *env) Token(t *testing.T) string {
 	t.Helper()
-	return e.tokenFor(t, e.Device, e.token)
+	return e.token
 }
 
-// OtherToken returns a token for e.OtherDevice, skipping the test if there
+// OtherToken returns the token for e.OtherDevice, skipping the test if there
 // is none.
 func (e *env) OtherToken(t *testing.T) string {
 	t.Helper()
 	if e.OtherDevice == "" {
-		t.Skip("no second device: set REMOTE_OTHER_TOKEN, or use REMOTE_HMAC_SECRET / REMOTE_JWT_KEY")
+		t.Skip("no second device: set REMOTE_OTHER_TOKEN")
 	}
-	return e.tokenFor(t, e.OtherDevice, e.otherToken)
-}
-
-func (e *env) tokenFor(t *testing.T, device, fixed string) string {
-	t.Helper()
-	if e.mint == nil {
-		return fixed
-	}
-	tok, err := e.mint(device)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return tok
-}
-
-// deviceClaim reads the device_id claim of a JWT without verifying it (the
-// server does that).
-func deviceClaim(token string) (string, error) {
-	parts := strings.Split(token, ".")
-	if len(parts) != 3 {
-		return "", errors.New("not a JWT")
-	}
-	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		return "", fmt.Errorf("JWT payload: %w", err)
-	}
-	var c struct {
-		DeviceID string `json:"device_id"`
-	}
-	if err := json.Unmarshal(payload, &c); err != nil || c.DeviceID == "" {
-		return "", errors.New("JWT has no device_id claim")
-	}
-	return c.DeviceID, nil
+	return e.otherToken
 }
 
 func tlsConfig(caFile string, insecure bool) (*tls.Config, error) {

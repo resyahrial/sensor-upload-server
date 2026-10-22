@@ -2,10 +2,12 @@
 # Makefile via `-include mk/*.mk`. Needs the server stack running on the
 # NETEM_NETWORK container network (default: the main compose project's).
 #
-#   make experiment-smoke TOKEN=$(go run ./cmd/devtoken ...) CA_FILE=certs/ca.pem
+#   make experiment-smoke TOKEN=$$(make -s device-key DEVICE=netem-0001) CA_FILE=certs/server.crt
 #   make experiment SERVER_URL=https://server:8443 GRPC_NATIVE_URL=server:9090 TOKEN=... CA_FILE=...
 #   make summary
 #
+# TOKEN is the device token {device_id}_{key} printed by `make device-key`
+# (dev stack) or `make vps-device-key` (VPS); DEVICE defaults to its device_id.
 # Other knobs (environment of deploy/netem/experiment.sh): DEVICE,
 # EXPERIMENT_PARALLEL, RUN_TIMEOUT, RESULTS_DIR, NETEM_NETWORK, UPLOADER_ARGS,
 # UPLOADER_CMD (test hook). Empty values fall back to the script's defaults.

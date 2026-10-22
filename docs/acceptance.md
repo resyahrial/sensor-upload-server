@@ -1,5 +1,13 @@
 # Acceptance (requirements §15)
 
+> **Auth changed since these runs.** Every run recorded below used the old
+> JWT auth (`cmd/devtoken`, ES256/HS256), which has been replaced by
+> per-device keys (README "Authentication", docs/decisions.md "Decisions
+> (device keys)"). The results are kept as recorded. To repeat a run today,
+> build only `./cmd/uploader` and replace each `devtoken` command with
+> `TOKEN=$(make -s device-key DEVICE=<device>)` (dev stack) or
+> `make -s vps-device-key VPS=... VPS_DEVICE=<device>` (VPS).
+
 Run on 2026-10-21 against the real compose stack (server image built from
 this branch, PostgreSQL 16, MinIO `OBJSTORE=s3`, tus `file` staging), started as
 a second stack next to other work:
@@ -8,8 +16,8 @@ a second stack next to other work:
 export SERVER_IMAGE=localhost/sensor-upload-server:acc COMPOSE_NETWORK=sensor-upload-acc_net
 make up COMPOSE="podman compose -p sensor-upload-acc" \
   HOST_HTTPS_PORT=38443 HOST_GRPC_PORT=39090 HOST_METRICS_PORT=39100
-go build -o bin/ ./cmd/uploader ./cmd/devtoken
-TOKEN=$(bin/devtoken -device dev-1 -alg ES256 -key certs/jwt.key)
+go build -o bin/ ./cmd/uploader ./cmd/devtoken                  # historical (JWT)
+TOKEN=$(bin/devtoken -device dev-1 -alg ES256 -key certs/jwt.key) # today: TOKEN=$(make -s device-key DEVICE=dev-1 COMPOSE=...)
 ```
 
 Endpoints: `rest` and `rest-http3` = `https://localhost:38443` (TCP / QUIC),
@@ -209,6 +217,12 @@ Concurrent duplicates:
 
 ## 6. Auth — PASS
 
+*Historical: run with the old JWT auth. The device-key equivalents (missing,
+malformed, wrong key, unknown device, rotated key → 401 / `UNAUTHENTICATED`;
+key store down → 503 / `UNAVAILABLE`) are covered by `TestAuthFailures` and
+`TestGRPCAuth` (test/e2e), the tusapi/grpcapi `DeviceKey` tests and
+`TestRemoteBadToken`.*
+
 Every token variant against every endpoint, including requests on an
 existing upload (HEAD/PATCH, Status/Upload):
 
@@ -264,7 +278,7 @@ The server was then recreated with the defaults (168h / 1h).
 
 ```sh
 make netem-image        # rebuilt from this branch (needed the stack stopped: compiling sqlite OOMs the 2 GB VM otherwise)
-TOKEN=<devtoken -device netem-0001 -ttl 12h, issued inside a container — see "Decisions (acceptance)", clock skew>
+TOKEN=<devtoken -device netem-0001 -ttl 12h, issued inside a container — see "Decisions (acceptance)", clock skew>   # historical (JWT); today: $(make -s device-key DEVICE=netem-0001)
 NETEM_NETWORK=sensor-upload-acc_net make experiment-smoke TOKEN="$TOKEN" CA_FILE=certs/server.crt
 ```
 
@@ -317,6 +331,7 @@ clock checked in step first). The driver was called directly because
 image in the VM:
 
 ```sh
+# historical (JWT); today: TOKEN=$(make -s device-key DEVICE=netem-0001)
 TOKEN=$(bin/devtoken -device netem-0001 -alg ES256 -key certs/jwt.key -ttl 12h) \
 CA_FILE=$PWD/certs/server.crt RESULTS_DIR=$PWD/results \
 NETEM_IMAGE=localhost/sensor-uploader-netem:acc2 NETEM_NETWORK=sensor-upload-acc2_net CONTAINER_RT=podman \

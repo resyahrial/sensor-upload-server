@@ -16,6 +16,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sort"
+	"strings"
 	"syscall"
 	"time"
 
@@ -50,8 +51,8 @@ func parseFlags(args []string, stderr io.Writer) (options, error) {
 	fs.SetOutput(stderr)
 	fs.StringVar(&o.cfg.Protocol, "protocol", client.ProtoREST, "rest | rest-http3 | grpc | grpc-native")
 	fs.StringVar(&o.cfg.URL, "url", "https://localhost:8443", "server base URL (grpc-native: the native listener address)")
-	fs.StringVar(&o.cfg.Token, "token", os.Getenv("UPLOADER_TOKEN"), "device JWT (default $UPLOADER_TOKEN)")
-	fs.StringVar(&o.cfg.Device, "device", "", "device_id (must match the token)")
+	fs.StringVar(&o.cfg.Token, "token", os.Getenv("UPLOADER_TOKEN"), "device token {device_id}_{key} from `devicekey set` (default $UPLOADER_TOKEN)")
+	fs.StringVar(&o.cfg.Device, "device", "", "device_id (must match the token; default: the token's device_id)")
 	fs.IntVar(&o.cfg.Priority, "priority", 3, "1 alert · 2 thumbnail · 3 clip · 4 full file")
 	fs.IntVar(&o.cfg.Chunk, "chunk", 262144, "chunk size in bytes")
 	fs.IntVar(&o.cfg.Retries, "retries", 50, "retries per file after the first attempt")
@@ -70,6 +71,12 @@ func parseFlags(args []string, stderr io.Writer) (options, error) {
 	fs.BoolVar(&o.verbose, "v", false, "debug logging")
 	if err := fs.Parse(args); err != nil {
 		return o, err
+	}
+	if o.cfg.Device == "" {
+		// The token is {device_id}_{key}; keys never contain "_".
+		if i := strings.LastIndexByte(o.cfg.Token, '_'); i > 0 {
+			o.cfg.Device = o.cfg.Token[:i]
+		}
 	}
 	if (o.file == "") == (o.dir == "") {
 		return o, errors.New("exactly one of -file or -dir is required")

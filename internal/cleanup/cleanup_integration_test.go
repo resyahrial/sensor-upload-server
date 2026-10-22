@@ -51,7 +51,7 @@ const (
 
 var (
 	testDSN string
-	secret  = []byte("test-secret")
+	keys    = auth.NewMemoryStore()
 )
 
 func TestMain(m *testing.M) { os.Exit(runWithPostgres(m)) }
@@ -80,7 +80,7 @@ func runWithPostgres(m *testing.M) int {
 
 func authCtx(t *testing.T) context.Context {
 	t.Helper()
-	tok, err := auth.Sign(auth.HS256, secret, itDevice, time.Now(), time.Hour)
+	tok, err := keys.Token(itDevice)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,7 +155,7 @@ func newITEnv(t *testing.T) *itEnv {
 	if err != nil {
 		t.Fatal(err)
 	}
-	verifier, err := auth.NewVerifier(auth.Config{Algs: []string{auth.HS256}, HMACSecret: secret})
+	verifier, err := auth.NewVerifier(keys, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

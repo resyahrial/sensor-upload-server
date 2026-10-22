@@ -28,7 +28,6 @@ import (
 	"google.golang.org/grpc/status"
 
 	uploadv1 "github.com/resyahrial/sensor-upload-server/gen/upload/v1"
-	"github.com/resyahrial/sensor-upload-server/internal/auth"
 	"github.com/resyahrial/sensor-upload-server/internal/grpcprefix"
 )
 
@@ -119,9 +118,9 @@ type uploader interface {
 
 // newUploader returns an uploader for f over protocol p.
 func newUploader(p string, s *server, f file) (uploader, error) {
-	tok, err := auth.Sign(auth.HS256, []byte(hmacSecret), f.Device, time.Now(), 6*time.Hour)
+	tok, err := s.token(context.Background(), f.Device)
 	if err != nil {
-		return nil, fmt.Errorf("sign token: %w", err)
+		return nil, fmt.Errorf("device token: %w", err)
 	}
 	pool := x509.NewCertPool()
 	pool.AppendCertsFromPEM(caPEM)

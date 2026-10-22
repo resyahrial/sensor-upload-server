@@ -89,11 +89,6 @@ func New(ctx context.Context, opts Options) (_ *App, err error) {
 	if err := os.MkdirAll(cfg.StagingDir, 0o750); err != nil {
 		return nil, fmt.Errorf("create staging dir: %w", err)
 	}
-	verifier, err := newVerifier(cfg)
-	if err != nil {
-		return nil, err
-	}
-
 	startCtx, cancelStart := context.WithTimeout(ctx, dbStartupTimeout)
 	defer cancelStart()
 	pool, err := db.Open(startCtx, cfg.DatabaseURL)
@@ -110,6 +105,12 @@ func New(ctx context.Context, opts Options) (_ *App, err error) {
 		return nil, err
 	}
 	log.Info("database ready")
+	// One indexed lookup in device_keys per tus request / gRPC call or
+	// stream; no cache (docs/decisions.md "Decisions (device keys)").
+	verifier, err := auth.NewVerifier(db.NewDeviceKeys(pool), auth.DefaultLookupTimeout)
+	if err != nil {
+		return nil, err
+	}
 
 	store := opts.ObjectStore
 	if store == nil {
@@ -289,7 +290,7 @@ func (a *App) Run(ctx context.Context) error {
 		nativeAddr = a.native.Addr().String()
 	}
 	a.log.Info("server started", "listen_addr", a.public.Addr().String(), "h3_addr", a.h3.Addr().String(),
-		"grpc_native_addr", nativeAddr, "metrics_addr", a.admin.Addr().String(), "dev_mode", a.cfg.DevMode)
+		"grpc_native_addr", nativeAddr, "metrics_addr", a.admin.Addr().String())
 
 	cleanCtx, stopClean := context.WithCancel(context.WithoutCancel(ctx))
 	cleanDone, retDone := make(chan struct{}), make(chan struct{})
@@ -382,23 +383,6 @@ func (a *App) close() {
 		_ = c.Close() // never served; nothing to drain
 	}
 	a.pool.Close()
-}
-
-func newVerifier(cfg config.Config) (*auth.Verifier, error) {
-	ac := auth.Config{Algs: cfg.JWTAlgs}
-	if cfg.HasAlg(config.AlgES256) {
-		pem, err := os.ReadFile(cfg.JWTPublicKeyFile)
-		if err != nil {
-			return nil, fmt.Errorf("read JWT public key: %w", err)
-		}
-		if ac.ES256Key, err = auth.ParseES256PublicKey(pem); err != nil {
-			return nil, err
-		}
-	}
-	if cfg.HasAlg(config.AlgHS256) {
-		ac.HMACSecret = []byte(cfg.JWTHMACSecret)
-	}
-	return auth.NewVerifier(ac)
 }
 
 func s3Config(cfg config.Config) objstore.S3Config {

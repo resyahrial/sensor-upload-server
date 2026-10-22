@@ -13,6 +13,7 @@ import (
 	"google.golang.org/grpc/codes"
 
 	uploadv1 "github.com/resyahrial/sensor-upload-server/gen/upload/v1"
+	"github.com/resyahrial/sensor-upload-server/internal/auth"
 	"github.com/resyahrial/sensor-upload-server/internal/client"
 	"github.com/resyahrial/sensor-upload-server/internal/fileapi"
 )
@@ -191,14 +192,26 @@ func TestRemoteDuplicate(t *testing.T) {
 	}
 }
 
-// TestRemoteBadToken: a missing or forged token is 401 / UNAUTHENTICATED.
+// TestRemoteBadToken: a missing, malformed or wrong device token is 401 /
+// UNAUTHENTICATED, whether the device exists or not.
 func TestRemoteBadToken(t *testing.T) {
 	e := remoteEnv(t)
 	f := newFile(t, 1024)
 	m := meta{Device: e.Device, SHA256: f.SHA256}
-	forged := e.Token(t)
-	forged = forged[:strings.LastIndexByte(forged, '.')+1] + "c2lnbmF0dXJl" // wrong signature
-	for name, tok := range map[string]string{"missing": "", "garbage": "not-a-jwt", "bad signature": forged} {
+	_, key, err := auth.ParseToken(e.Token(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrong := strings.Repeat("0", auth.KeyHexLen)
+	if wrong == key {
+		wrong = strings.Repeat("1", auth.KeyHexLen)
+	}
+	for name, tok := range map[string]string{
+		"missing":        "",
+		"garbage":        "not-a-token",
+		"wrong key":      auth.FormatToken(e.Device, wrong),
+		"unknown device": auth.FormatToken("remote-unknown-"+key[:12], key),
+	} {
 		for _, h3 := range []bool{false, true} {
 			res, body := e.tus(t, h3, tok).create(len(f.Data), m)
 			if res.StatusCode != http.StatusUnauthorized {

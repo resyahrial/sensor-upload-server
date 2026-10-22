@@ -21,7 +21,6 @@ func baseEnv() map[string]string {
 		"TLS_CERT_FILE":       "cert.pem",
 		"TLS_KEY_FILE":        "key.pem",
 		"DATABASE_URL":        "postgres://localhost/db",
-		"JWT_PUBLIC_KEY_FILE": "jwt.pub",
 	}
 }
 
@@ -56,7 +55,6 @@ func TestLoadDefaults(t *testing.T) {
 		{"GRPCAckEveryN", c.GRPCAckEveryN, 1},
 		{"QUICIdleTimeout", c.QUICIdleTimeout, 60 * time.Second},
 		{"QUICKeepAlive", c.QUICKeepAlive, 20 * time.Second},
-		{"DevMode", c.DevMode, false},
 		{"LogLevel", c.LogLevel, slog.LevelInfo},
 		{"ShutdownTimeout", c.ShutdownTimeout, 30 * time.Second},
 		{"S3.ForcePathStyle", c.S3.ForcePathStyle, false},
@@ -71,14 +69,8 @@ func TestLoadDefaults(t *testing.T) {
 			t.Errorf("%s = %v, want %v", ch.name, ch.got, ch.want)
 		}
 	}
-	if !slices.Equal(c.JWTAlgs, []string{"ES256"}) {
-		t.Errorf("JWTAlgs = %v", c.JWTAlgs)
-	}
 	if !slices.Equal(c.ContentTypes, DefaultContentTypes) {
 		t.Errorf("ContentTypes = %v", c.ContentTypes)
-	}
-	if !c.HasAlg(AlgES256) || c.HasAlg(AlgHS256) {
-		t.Errorf("HasAlg wrong for %v", c.JWTAlgs)
 	}
 }
 
@@ -92,9 +84,6 @@ func TestLoadOverrides(t *testing.T) {
 		"S3_REGION", "us-east-1",
 		"S3_ENDPOINT", "http://minio:9000",
 		"S3_FORCE_PATH_STYLE", "true",
-		"JWT_ALGS", " ES256 , HS256 ",
-		"JWT_HMAC_SECRET", strings.Repeat("s", MinHMACSecretBytes),
-		"DEV_MODE", "true",
 		"CONTENT_TYPES", "image/jpeg,,video/mp4",
 		"MAX_FILE_BYTES", "1024",
 		"INCOMPLETE_TTL", "1h",
@@ -103,22 +92,16 @@ func TestLoadOverrides(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if !slices.Equal(c.JWTAlgs, []string{"ES256", "HS256"}) {
-		t.Errorf("JWTAlgs = %v", c.JWTAlgs)
-	}
 	if !slices.Equal(c.ContentTypes, []string{"image/jpeg", "video/mp4"}) {
 		t.Errorf("ContentTypes = %v", c.ContentTypes)
-	}
-	if c.LogLevel != slog.LevelDebug {
-		t.Errorf("DEV_MODE without LOG_LEVEL should give debug, got %v", c.LogLevel)
 	}
 	if !c.S3.ForcePathStyle || c.S3.Bucket != "b" || c.MaxFileBytes != 1024 || c.IncompleteTTL != time.Hour || c.GRPCAckEveryN != 4 {
 		t.Errorf("overrides not applied: %+v", c)
 	}
 }
 
-func TestDevModeRespectsExplicitLogLevel(t *testing.T) {
-	c, err := Load(env(with("DEV_MODE", "true", "LOG_LEVEL", "warn")))
+func TestExplicitLogLevel(t *testing.T) {
+	c, err := Load(env(with("LOG_LEVEL", "warn")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,13 +119,6 @@ func TestLoadValidation(t *testing.T) {
 		{"missing TLS cert", without("TLS_CERT_FILE"), "TLS_CERT_FILE is required"},
 		{"missing TLS key", without("TLS_KEY_FILE"), "TLS_KEY_FILE is required"},
 		{"missing database", without("DATABASE_URL"), "DATABASE_URL is required"},
-		{"HS256 without dev mode", with("JWT_ALGS", "HS256", "JWT_HMAC_SECRET", "s"), "HS256 is only allowed when DEV_MODE=true"},
-		{"HS256 without secret", with("JWT_ALGS", "HS256", "DEV_MODE", "true"), "JWT_HMAC_SECRET is required"},
-		{"HS256 short secret", with("JWT_ALGS", "HS256", "DEV_MODE", "true", "JWT_HMAC_SECRET", strings.Repeat("s", MinHMACSecretBytes-1)), "JWT_HMAC_SECRET must be at least 32 bytes, got 31"},
-		{"ES256 without key", with("JWT_PUBLIC_KEY_FILE", ""), "JWT_PUBLIC_KEY_FILE is required"},
-		{"unknown alg", with("JWT_ALGS", "none"), `unsupported algorithm "none"`},
-		{"RS256 rejected", with("JWT_ALGS", "RS256"), `unsupported algorithm "RS256"`},
-		{"empty alg list", with("JWT_ALGS", ","), "JWT_ALGS must list"},
 		{"bad duration", with("INCOMPLETE_TTL", "7days"), "INCOMPLETE_TTL"},
 		{"negative duration", with("CLEANUP_INTERVAL", "-1s"), "CLEANUP_INTERVAL must be positive"},
 		{"zero shutdown", with("SHUTDOWN_TIMEOUT", "0s"), "SHUTDOWN_TIMEOUT must be positive"},
@@ -150,7 +126,6 @@ func TestLoadValidation(t *testing.T) {
 		{"zero max file", with("MAX_FILE_BYTES", "0"), "MAX_FILE_BYTES must be positive"},
 		{"zero chunk", with("GRPC_MAX_CHUNK_BYTES", "0"), "GRPC_MAX_CHUNK_BYTES must be positive"},
 		{"zero ack", with("GRPC_ACK_EVERY_N", "0"), "GRPC_ACK_EVERY_N must be positive"},
-		{"bad bool", with("DEV_MODE", "yes please"), "DEV_MODE"},
 		{"bad path style", with("S3_FORCE_PATH_STYLE", "maybe"), "S3_FORCE_PATH_STYLE"},
 		{"bad log level", with("LOG_LEVEL", "loud"), "LOG_LEVEL"},
 		{"bad tus staging", with("TUS_STAGING", "memory"), "TUS_STAGING"},
@@ -197,7 +172,7 @@ func TestLoadReportsAllErrors(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	for _, want := range []string{"TLS_CERT_FILE", "TLS_KEY_FILE", "DATABASE_URL", "INCOMPLETE_TTL", "JWT_PUBLIC_KEY_FILE"} {
+	for _, want := range []string{"TLS_CERT_FILE", "TLS_KEY_FILE", "DATABASE_URL", "INCOMPLETE_TTL"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error missing %s: %v", want, err)
 		}

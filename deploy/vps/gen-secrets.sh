@@ -4,8 +4,6 @@
 #   ca.crt, ca.key          self-signed CA (P-256, 10 years); clients trust ca.crt
 #   server.crt, server.key  server certificate signed by the CA, SAN = the VPS IP
 #                           (+ --san extras), 397 days
-#   jwt.key, jwt.pub        ES256 key pair (devtoken signs with jwt.key; the
-#                           server only gets jwt.pub)
 #   .env                    random Postgres / MinIO credentials for docker-compose.yml
 #
 # Usage: gen-secrets.sh --ip 203.0.113.10 [--san IP:10.0.0.5,DNS:vps.example] \
@@ -20,7 +18,8 @@
 #
 # Idempotent: existing files are kept unless --force / --renew-cert. Same
 # openssl recipe as `make devcert` (P-256 keys), plus a CA.
-# ca.key and jwt.key never leave this machine (deploy.sh does not copy them).
+# ca.key never leaves this machine (deploy.sh does not copy it). Device keys
+# are not generated here: they live in the VPS database (make vps-device-key).
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -30,7 +29,7 @@ san_extra=""
 force=0
 renew=0
 
-usage() { sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 while (($#)); do
 	case $1 in
@@ -120,16 +119,6 @@ else
 	fi
 fi
 
-if need "$out/jwt.key" || need "$out/jwt.pub"; then
-	echo "gen-secrets: ES256 JWT key pair -> $out/jwt.key, $out/jwt.pub"
-	openssl ecparam -name prime256v1 -genkey -noout -out "$tmp/jwt.key"
-	openssl ec -in "$tmp/jwt.key" -pubout -out "$tmp/jwt.pub" 2>/dev/null
-	mv "$tmp/jwt.key" "$out/jwt.key"
-	mv "$tmp/jwt.pub" "$out/jwt.pub"
-else
-	echo "gen-secrets: keeping JWT key pair $out/jwt.key"
-fi
-
 if need "$out/.env"; then
 	echo "gen-secrets: random credentials -> $out/.env"
 	sed \
@@ -154,6 +143,6 @@ else
 	echo "gen-secrets: keeping $out/.env"
 fi
 
-chmod 600 "$out/ca.key" "$out/server.key" "$out/jwt.key" "$out/.env"
-chmod 644 "$out/ca.crt" "$out/server.crt" "$out/jwt.pub"
-echo "gen-secrets: done. Clients trust $out/ca.crt; keep ca.key and jwt.key private."
+chmod 600 "$out/ca.key" "$out/server.key" "$out/.env"
+chmod 644 "$out/ca.crt" "$out/server.crt"
+echo "gen-secrets: done. Clients trust $out/ca.crt; keep ca.key private."

@@ -1,218 +1,213 @@
 package auth
 
 import (
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
-	"crypto/rsa"
-	"crypto/x509"
-	"encoding/pem"
+	"context"
+	"crypto/sha256"
 	"errors"
+	"strings"
 	"testing"
 	"time"
-
-	"github.com/golang-jwt/jwt/v5"
 )
 
-var (
-	now    = time.Date(2026, 10, 21, 5, 30, 0, 0, time.UTC)
-	secret = []byte("dev-secret")
-)
+var testKey = strings.Repeat("0123456789abcdef", 4)
 
-func mustECKey(t *testing.T) *ecdsa.PrivateKey {
-	t.Helper()
-	k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return k
-}
-
-func newVerifier(t *testing.T, pub *ecdsa.PublicKey, algs ...string) *Verifier {
-	t.Helper()
-	v, err := NewVerifier(Config{Algs: algs, ES256Key: pub, HMACSecret: secret, Now: func() time.Time { return now }})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return v
-}
-
-func signClaims(t *testing.T, method jwt.SigningMethod, key any, c jwt.Claims) string {
-	t.Helper()
-	s, err := jwt.NewWithClaims(method, c).SignedString(key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return s
-}
-
-func claims(device string, exp time.Time) Claims {
-	return Claims{DeviceID: device, RegisteredClaims: jwt.RegisteredClaims{ExpiresAt: jwt.NewNumericDate(exp)}}
-}
-
-func TestVerify(t *testing.T) {
-	es := mustECKey(t)
-	other := mustECKey(t)
-	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatal(err)
-	}
-	pubDER, err := x509.MarshalPKIXPublicKey(&es.PublicKey)
-	if err != nil {
-		t.Fatal(err)
-	}
-	pubPEM := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubDER})
-	both := newVerifier(t, &es.PublicKey, ES256, HS256)
-	esOnly := newVerifier(t, &es.PublicKey, ES256)
-
-	valid, err := Sign(ES256, es, "bioac-0142", now, time.Hour)
-	if err != nil {
-		t.Fatal(err)
-	}
-	validHS, err := Sign(HS256, secret, "bioac-0142", now, time.Hour)
-	if err != nil {
-		t.Fatal(err)
-	}
-	none := signClaims(t, jwt.SigningMethodNone, jwt.UnsafeAllowNoneSignatureType, claims("bioac-0142", now.Add(time.Hour)))
-
+func TestParseToken(t *testing.T) {
 	tests := []struct {
-		name    string
-		v       *Verifier
-		token   string
-		wantDev string
+		name, token, device, key string
 	}{
-		{"valid ES256", esOnly, valid, "bioac-0142"},
-		{"valid HS256", both, validHS, "bioac-0142"},
-		{"expired within leeway", esOnly, signClaims(t, jwt.SigningMethodES256, es, claims("d-1", now.Add(-time.Minute))), "d-1"},
-		{"expired", esOnly, signClaims(t, jwt.SigningMethodES256, es, claims("d-1", now.Add(-3*time.Minute))), ""},
-		{"nbf in future", esOnly, signClaims(t, jwt.SigningMethodES256, es, Claims{DeviceID: "d-1", RegisteredClaims: jwt.RegisteredClaims{
-			ExpiresAt: jwt.NewNumericDate(now.Add(time.Hour)), NotBefore: jwt.NewNumericDate(now.Add(5 * time.Minute))}}), ""},
-		{"nbf within leeway", esOnly, signClaims(t, jwt.SigningMethodES256, es, Claims{DeviceID: "d-1", RegisteredClaims: jwt.RegisteredClaims{
-			ExpiresAt: jwt.NewNumericDate(now.Add(time.Hour)), NotBefore: jwt.NewNumericDate(now.Add(time.Minute))}}), "d-1"},
-		{"iat in future", esOnly, signClaims(t, jwt.SigningMethodES256, es, Claims{DeviceID: "d-1", RegisteredClaims: jwt.RegisteredClaims{
-			ExpiresAt: jwt.NewNumericDate(now.Add(time.Hour)), IssuedAt: jwt.NewNumericDate(now.Add(10 * time.Minute))}}), ""},
-		{"missing exp", esOnly, signClaims(t, jwt.SigningMethodES256, es, Claims{DeviceID: "d-1"}), ""},
-		{"missing device_id", esOnly, signClaims(t, jwt.SigningMethodES256, es, claims("", now.Add(time.Hour))), ""},
-		{"alg none", both, none, ""},
-		{"HS256 when only ES256 enabled", esOnly, validHS, ""},
-		{"RS256", both, signClaims(t, jwt.SigningMethodRS256, rsaKey, claims("d-1", now.Add(time.Hour))), ""},
-		{"ES384", both, signClaims(t, jwt.SigningMethodES384, mustP384(t), claims("d-1", now.Add(time.Hour))), ""},
-		{"wrong ES256 key", esOnly, signClaims(t, jwt.SigningMethodES256, other, claims("d-1", now.Add(time.Hour))), ""},
-		{"wrong HMAC secret", both, signClaims(t, jwt.SigningMethodHS256, []byte("other"), claims("d-1", now.Add(time.Hour))), ""},
-		{"HS256 signed with ES256 public key (alg confusion)", both, signClaims(t, jwt.SigningMethodHS256, pubPEM, claims("d-1", now.Add(time.Hour))), ""},
-		{"malformed", both, "not.a.jwt", ""},
-		{"empty", both, "", ""},
+		{"valid", "bioac-0142_" + testKey, "bioac-0142", testKey},
+		{"empty", "", "", ""},
+		{"no underscore", "bioac-0142" + testKey, "", ""},
+		{"empty device", "_" + testKey, "", ""},
+		{"empty key", "bioac-0142_", "", ""},
+		{"split at last underscore", "bio_ac_" + testKey, "", ""}, // device "bio_ac" is invalid
+		{"key with underscore", "bioac-0142_" + testKey[:32] + "_" + testKey[33:], "", ""},
+		{"invalid device", "Bioac-0142_" + testKey, "", ""},
+		{"device too short", "ab_" + testKey, "", ""},
+		{"uppercase hex", "bioac-0142_" + strings.ToUpper(testKey), "", ""},
+		{"non-hex key", "bioac-0142_" + strings.Repeat("g", KeyHexLen), "", ""},
+		{"key too short", "bioac-0142_" + testKey[1:], "", ""},
+		{"key too long", "bioac-0142_" + testKey + "0", "", ""},
+		{"jwt", "eyJhbGciOiJIUzI1NiJ9.eyJkZXZpY2VfaWQiOiJ4In0.sig", "", ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			dev, err := tt.v.Verify(tt.token)
-			if tt.wantDev != "" {
-				if err != nil || dev != tt.wantDev {
-					t.Fatalf("Verify = %q, %v; want %q", dev, err, tt.wantDev)
+			dev, key, err := ParseToken(tt.token)
+			if tt.device == "" {
+				if !errors.Is(err, ErrUnauthenticated) {
+					t.Fatalf("ParseToken(%q) = %q, %q, %v; want ErrUnauthenticated", tt.token, dev, key, err)
 				}
 				return
 			}
-			if !errors.Is(err, ErrUnauthenticated) {
-				t.Fatalf("Verify = %q, %v; want ErrUnauthenticated", dev, err)
+			if err != nil || dev != tt.device || key != tt.key {
+				t.Fatalf("ParseToken = %q, %q, %v", dev, key, err)
 			}
 		})
 	}
 }
 
-func mustP384(t *testing.T) *ecdsa.PrivateKey {
-	t.Helper()
-	k, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
+func TestParseTokenErrorOmitsKey(t *testing.T) {
+	_, _, err := ParseToken("bioac-0142_" + strings.ToUpper(testKey))
+	if err == nil || strings.Contains(err.Error(), strings.ToUpper(testKey)) {
+		t.Fatalf("error %v leaks the key", err)
 	}
-	return k
 }
 
-func TestVerifyHeader(t *testing.T) {
-	v := newVerifier(t, nil, HS256)
-	tok, err := Sign(HS256, secret, "cam-01", now, time.Minute)
+func TestGenerateKey(t *testing.T) {
+	a, err := GenerateKey()
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, h := range []string{"Bearer " + tok, "bearer " + tok, "  Bearer   " + tok + " "} {
-		if dev, err := v.VerifyHeader(h); err != nil || dev != "cam-01" {
-			t.Errorf("VerifyHeader(%q) = %q, %v", h, dev, err)
-		}
+	b, err := GenerateKey()
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, h := range []string{"", "Bearer", "Bearer ", "Basic " + tok, tok} {
-		if _, err := v.VerifyHeader(h); !errors.Is(err, ErrUnauthenticated) {
-			t.Errorf("VerifyHeader(%q) = %v, want ErrUnauthenticated", h, err)
-		}
+	if !ValidKey(a) || !ValidKey(b) || a == b {
+		t.Fatalf("keys %q, %q", a, b)
+	}
+	if strings.Contains(a, "_") {
+		t.Fatal("key contains _")
+	}
+	dev, key, err := ParseToken(FormatToken("cam-01", a))
+	if err != nil || dev != "cam-01" || key != a {
+		t.Fatalf("round trip: %q %q %v", dev, key, err)
+	}
+}
+
+func TestHashKey(t *testing.T) {
+	want := sha256.Sum256([]byte(testKey))
+	if string(HashKey(testKey)) != string(want[:]) {
+		t.Fatal("HashKey is not SHA-256")
+	}
+}
+
+// slowStore blocks until the lookup context is done.
+type slowStore struct{}
+
+func (slowStore) KeyHash(ctx context.Context, _ string) ([]byte, bool, error) {
+	<-ctx.Done()
+	return nil, false, ctx.Err()
+}
+
+func TestVerifier(t *testing.T) {
+	store := NewMemoryStore()
+	store.Set("bioac-0142", testKey)
+	v, err := NewVerifier(store, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherKey := strings.Repeat("f", KeyHexLen)
+	tests := []struct {
+		name, header, device string
+		wantErr              error
+	}{
+		{"valid", "Bearer bioac-0142_" + testKey, "bioac-0142", nil},
+		{"lowercase scheme", "bearer bioac-0142_" + testKey, "bioac-0142", nil},
+		{"wrong key", "Bearer bioac-0142_" + otherKey, "", ErrUnauthenticated},
+		{"unknown device", "Bearer cam-0001_" + testKey, "", ErrUnauthenticated},
+		{"missing header", "", "", ErrUnauthenticated},
+		{"basic scheme", "Basic Zm9vOmJhcg==", "", ErrUnauthenticated},
+		{"empty token", "Bearer  ", "", ErrUnauthenticated},
+		{"malformed", "Bearer not-a-token", "", ErrUnauthenticated},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dev, err := v.VerifyHeader(t.Context(), tt.header)
+			if tt.wantErr != nil {
+				if !errors.Is(err, tt.wantErr) || dev != "" {
+					t.Fatalf("= %q, %v; want %v", dev, err, tt.wantErr)
+				}
+				if strings.Contains(err.Error(), testKey) || strings.Contains(err.Error(), otherKey) {
+					t.Fatalf("error %v leaks the key", err)
+				}
+				return
+			}
+			if err != nil || dev != tt.device {
+				t.Fatalf("= %q, %v", dev, err)
+			}
+		})
+	}
+}
+
+func TestVerifierRotationAndDelete(t *testing.T) {
+	store := NewMemoryStore()
+	v, err := NewVerifier(store, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old, err := store.Issue("cam-01")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := v.Verify(t.Context(), old); err != nil {
+		t.Fatalf("first key: %v", err)
+	}
+	if again, _ := store.Token("cam-01"); again != old {
+		t.Fatal("Token re-issued an existing key")
+	}
+	rotated, err := store.Issue("cam-01")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := v.Verify(t.Context(), old); !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("old key after rotation: %v", err)
+	}
+	if dev, err := v.Verify(t.Context(), rotated); err != nil || dev != "cam-01" {
+		t.Fatalf("new key: %q %v", dev, err)
+	}
+	store.Delete("cam-01")
+	if _, err := v.Verify(t.Context(), rotated); !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("deleted key: %v", err)
+	}
+}
+
+func TestVerifierStoreFailure(t *testing.T) {
+	store := NewMemoryStore()
+	tok, err := store.Issue("cam-01")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.SetErr(errors.New("connection refused"))
+	v, err := NewVerifier(store, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = v.Verify(t.Context(), tok)
+	if !errors.Is(err, ErrUnavailable) || errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("store down: %v, want ErrUnavailable only", err)
+	}
+	// A malformed token never reaches the store.
+	if _, err := v.Verify(t.Context(), "junk"); !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("malformed with store down: %v", err)
+	}
+}
+
+func TestVerifierLookupTimeout(t *testing.T) {
+	v, err := NewVerifier(slowStore{}, 20*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	_, err = v.Verify(t.Context(), "cam-01_"+testKey)
+	if !errors.Is(err, ErrUnavailable) || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("slow store: %v", err)
+	}
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("lookup took %s", d)
+	}
+}
+
+func TestNewVerifierRequiresStore(t *testing.T) {
+	if _, err := NewVerifier(nil, 0); err == nil {
+		t.Fatal("nil store accepted")
 	}
 }
 
 func TestCheckDevice(t *testing.T) {
-	if err := CheckDevice("cam-01", "cam-01"); err != nil {
-		t.Errorf("same device: %v", err)
-	}
-	if err := CheckDevice("cam-01", "cam-02"); !errors.Is(err, ErrPermissionDenied) {
-		t.Errorf("different device: %v", err)
-	}
-}
-
-func TestNewVerifierErrors(t *testing.T) {
-	for name, cfg := range map[string]Config{
-		"no algs":         {},
-		"ES256 no key":    {Algs: []string{ES256}},
-		"HS256 no secret": {Algs: []string{HS256}},
-		"unknown alg":     {Algs: []string{"none"}, HMACSecret: secret},
-	} {
-		if _, err := NewVerifier(cfg); err == nil {
-			t.Errorf("%s: expected error", name)
-		}
-	}
-}
-
-func TestSignErrors(t *testing.T) {
-	es := mustECKey(t)
-	if _, err := Sign("RS256", es, "d", now, time.Hour); err == nil {
-		t.Error("unsupported alg should fail")
-	}
-	if _, err := Sign(ES256, es, "", now, time.Hour); err == nil {
-		t.Error("empty device should fail")
-	}
-	if _, err := Sign(ES256, es, "d", now, 0); err == nil {
-		t.Error("zero ttl should fail")
-	}
-	if _, err := Sign(ES256, secret, "d", now, time.Hour); err == nil {
-		t.Error("wrong key type should fail")
-	}
-}
-
-func TestParseKeys(t *testing.T) {
-	es := mustECKey(t)
-	privDER, err := x509.MarshalECPrivateKey(es)
-	if err != nil {
+	if err := CheckDevice("a", "a"); err != nil {
 		t.Fatal(err)
 	}
-	pubDER, err := x509.MarshalPKIXPublicKey(&es.PublicKey)
-	if err != nil {
-		t.Fatal(err)
-	}
-	priv, err := ParseES256PrivateKey(pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: privDER}))
-	if err != nil {
-		t.Fatal(err)
-	}
-	pub, err := ParseES256PublicKey(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubDER}))
-	if err != nil {
-		t.Fatal(err)
-	}
-	tok, err := Sign(ES256, priv, "cam-01", now, time.Hour)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if dev, err := newVerifier(t, pub, ES256).Verify(tok); err != nil || dev != "cam-01" {
-		t.Errorf("round trip = %q, %v", dev, err)
-	}
-	if _, err := ParseES256PublicKey([]byte("junk")); err == nil {
-		t.Error("junk public key should fail")
-	}
-	if _, err := ParseES256PrivateKey([]byte("junk")); err == nil {
-		t.Error("junk private key should fail")
+	if err := CheckDevice("a", "b"); !errors.Is(err, ErrPermissionDenied) {
+		t.Fatalf("mismatch: %v", err)
 	}
 }

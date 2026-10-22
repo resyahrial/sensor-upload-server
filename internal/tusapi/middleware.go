@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/tus/tusd/v2/pkg/handler"
 
+	"github.com/resyahrial/sensor-upload-server/internal/auth"
 	"github.com/resyahrial/sensor-upload-server/internal/db"
 )
 
@@ -76,10 +77,14 @@ func (h *endpoint) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	r.Header.Del("X-HTTP-Method-Override")
 	defer func() { h.logRequest(r, rw, st, start) }()
 
-	device, err := h.cfg.Verifier.VerifyHeader(r.Header.Get("Authorization"))
+	device, err := h.cfg.Verifier.VerifyHeader(r.Context(), r.Header.Get("Authorization"))
 	if err != nil {
 		st.fail(err)
-		writeError(rw, r, errUnauthenticated)
+		if errors.Is(err, auth.ErrUnavailable) {
+			writeError(rw, r, errAuthUnavailable)
+		} else {
+			writeError(rw, r, errUnauthenticated)
+		}
 		return
 	}
 	st.device = device
@@ -295,8 +300,12 @@ func (h *endpoint) editHeaders(method string, st *reqState, hdr http.Header, sta
 	}
 }
 
-// writeError writes a tus error response from the middleware.
+// writeError writes a tus error response from the middleware. Its bodies
+// are fixed strings, so a 5xx keeps its own body (see responseWriter).
 func writeError(w http.ResponseWriter, r *http.Request, e handler.Error) {
+	if rw, ok := w.(*responseWriter); ok {
+		rw.ownBody = true
+	}
 	hdr := w.Header()
 	hdr.Set("Tus-Resumable", "1.0.0")
 	for k, v := range e.HTTPResponse.Header {
@@ -362,6 +371,7 @@ type responseWriter struct {
 	status       int
 	errBody      []byte
 	generic      bool // 5xx: the body written is replaced
+	ownBody      bool // the middleware's own error (writeError): never replaced
 }
 
 const maxErrBody = 256
@@ -378,7 +388,7 @@ func (w *responseWriter) WriteHeader(code int) {
 	// handler.Error (store errors with staging paths, bucket names, ...).
 	// Every 5xx gets a fixed body instead; the original goes to the log.
 	var body string
-	if code >= http.StatusInternalServerError {
+	if code >= http.StatusInternalServerError && !w.ownBody {
 		w.generic = true
 		body = genericBody(code)
 		hdr := w.Header()

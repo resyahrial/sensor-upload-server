@@ -4,7 +4,6 @@ package e2e
 
 import (
 	"context"
-	"encoding/base64"
 	"fmt"
 	"io"
 	"net/http"
@@ -395,22 +394,37 @@ func TestShortCircuitGuard(t *testing.T) {
 	}
 }
 
-func noneToken(device string) string {
-	enc := base64.RawURLEncoding.EncodeToString
-	payload := fmt.Sprintf(`{"device_id":%q,"exp":%d}`, device, time.Now().Add(time.Hour).Unix())
-	return enc([]byte(`{"alg":"none","typ":"JWT"}`)) + "." + enc([]byte(payload)) + "."
+// badTokens returns invalid tokens for dev (whose key is in device_keys):
+// all must get the same 401 / UNAUTHENTICATED.
+func badTokens(t *testing.T, dev string) map[string]string {
+	t.Helper()
+	_, key, err := auth.ParseToken(Token(t, dev))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A device whose key was replaced: its first token is rejected.
+	rotated := device()
+	old := SetDeviceKey(t, rotated)
+	SetDeviceKey(t, rotated)
+	return map[string]string{
+		"missing":        "",
+		"wrong-key":      auth.FormatToken(dev, strings.Repeat("0", auth.KeyHexLen)),
+		"unknown-device": auth.FormatToken(device(), key),
+		"rotated-key":    old,
+		"no-underscore":  dev + key,
+		"jwt":            "eyJhbGciOiJIUzI1NiJ9.eyJkZXZpY2VfaWQiOiJ4In0.c2ln",
+	}
 }
 
 func TestAuthFailures(t *testing.T) {
 	s := StartServer(t, nil)
 	dev := device()
-	expired, _ := auth.Sign(auth.HS256, []byte(hmacSecret), dev, time.Now().Add(-2*time.Hour), time.Hour)
-	wrongKey, _ := auth.Sign(auth.HS256, []byte("not-the-secret"), dev, time.Now(), time.Hour)
 	f := NewFile(t, dev, 100)
 	owner := Endpoint(t, s, H2, "/rest/files/", dev)
 	loc := owner.MustCreate(f)
+	bad := badTokens(t, dev)
 	for _, ep := range endpoints {
-		for name, tok := range map[string]string{"missing": "", "expired": expired, "wrong-signature": wrongKey, "alg-none": noneToken(dev)} {
+		for name, tok := range bad {
 			t.Run(ep.name+"/"+name, func(t *testing.T) {
 				c := Endpoint(t, s, ep.proto, ep.base, dev)
 				c.Token = tok

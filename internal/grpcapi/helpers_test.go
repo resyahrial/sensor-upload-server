@@ -12,7 +12,6 @@ import (
 	"net"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/grpc"
@@ -37,7 +36,9 @@ const (
 	maxChunk = 4096
 )
 
-var secret = []byte("test-secret")
+// testKeys holds the device keys of every test env; token issues one key
+// per device and keeps it, so repeated calls stay valid.
+var testKeys = auth.NewMemoryStore()
 
 // fakeRepo is an in-memory Repo.
 type fakeRepo struct {
@@ -277,11 +278,17 @@ func newEnv(t *testing.T, opts ...envOpt) *env {
 // simulates a server restart when called again with the same state.
 func startEnv(t *testing.T, repo *fakeRepo, dir string, opts ...envOpt) *env {
 	t.Helper()
+	return startEnvWith(t, testKeys, repo, dir, opts...)
+}
+
+// startEnvWith is startEnv with its own key store.
+func startEnvWith(t *testing.T, keys auth.KeyStore, repo *fakeRepo, dir string, opts ...envOpt) *env {
+	t.Helper()
 	store, err := staging.New(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	verifier, err := auth.NewVerifier(auth.Config{Algs: []string{auth.HS256}, HMACSecret: secret})
+	verifier, err := auth.NewVerifier(keys, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -336,7 +343,7 @@ func (e *env) dial(prefix bool) *grpc.ClientConn {
 
 func token(t *testing.T, dev string) string {
 	t.Helper()
-	tok, err := auth.Sign(auth.HS256, secret, dev, time.Now(), time.Hour)
+	tok, err := testKeys.Token(dev)
 	if err != nil {
 		t.Fatal(err)
 	}

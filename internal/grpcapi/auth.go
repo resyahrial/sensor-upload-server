@@ -2,11 +2,14 @@ package grpcapi
 
 import (
 	"context"
+	"errors"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
+
+	"github.com/resyahrial/sensor-upload-server/internal/auth"
 )
 
 type deviceKey struct{}
@@ -17,10 +20,16 @@ func deviceFrom(ctx context.Context) string {
 	return d
 }
 
-var errUnauthenticated = status.Error(codes.Unauthenticated, "missing or invalid token")
+var (
+	errUnauthenticated = status.Error(codes.Unauthenticated, "missing or invalid token")
+	// errAuthUnavailable: the device key could not be looked up (database
+	// down); clients retry UNAVAILABLE.
+	errAuthUnavailable = status.Error(codes.Unavailable, "authentication temporarily unavailable")
+)
 
 // authenticate rejects calls during shutdown and verifies the bearer token
-// in the "authorization" metadata, returning ctx carrying the device_id.
+// in the "authorization" metadata (once per call, i.e. once per stream),
+// returning ctx carrying the device_id.
 // It applies to every method, so it never inspects the method name (which
 // differs between the bare and the /grpc-prefixed registration).
 func (s *Service) authenticate(ctx context.Context) (context.Context, error) {
@@ -32,9 +41,13 @@ func (s *Service) authenticate(ctx context.Context) (context.Context, error) {
 	if len(vals) != 1 {
 		return nil, errUnauthenticated
 	}
-	device, err := s.verifier.VerifyHeader(vals[0])
+	device, err := s.verifier.VerifyHeader(ctx, vals[0])
 	if err != nil {
-		s.log.Info("authentication failed", "error", err)
+		if errors.Is(err, auth.ErrUnavailable) {
+			s.log.Warn("authentication unavailable", "error", err.Error())
+			return nil, errAuthUnavailable
+		}
+		s.log.Info("authentication failed", "error", err.Error())
 		return nil, errUnauthenticated
 	}
 	return context.WithValue(ctx, deviceKey{}, device), nil

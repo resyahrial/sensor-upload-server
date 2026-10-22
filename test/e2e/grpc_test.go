@@ -17,7 +17,6 @@ import (
 	"google.golang.org/grpc/codes"
 
 	uploadv1 "github.com/resyahrial/sensor-upload-server/gen/upload/v1"
-	"github.com/resyahrial/sensor-upload-server/internal/auth"
 	"github.com/resyahrial/sensor-upload-server/internal/client"
 	"github.com/resyahrial/sensor-upload-server/internal/db"
 )
@@ -292,12 +291,9 @@ func TestGRPCAuth(t *testing.T) {
 	owner := DialGRPC(t, s, grpcModes[0], dev)
 	f := NewFile(t, dev, chunk)
 	id := owner.MustInit(f).GetUploadId()
-	expired, err := auth.Sign(auth.HS256, []byte(hmacSecret), dev, time.Now().Add(-2*time.Hour), time.Hour)
-	if err != nil {
-		t.Fatal(err)
-	}
+	bad := badTokens(t, dev)
 	for _, m := range grpcModes {
-		for name, tok := range map[string]string{"missing": "", "expired": expired, "alg-none": noneToken(dev)} {
+		for name, tok := range bad {
 			t.Run(m.name+"/"+name, func(t *testing.T) {
 				g := DialGRPC(t, s, m, dev)
 				g.Token = tok
@@ -318,7 +314,7 @@ func TestGRPCAuth(t *testing.T) {
 	}
 
 	other := DialGRPC(t, s, grpcModes[2], device())
-	_, err = other.C.Init(other.Ctx(), InitReq(f, ""))
+	_, err := other.C.Init(other.Ctx(), InitReq(f, ""))
 	WantCode(t, "Init with another device's metadata", err, codes.PermissionDenied)
 	_, err = other.C.Status(other.Ctx(), &uploadv1.StatusRequest{UploadId: id})
 	WantCode(t, "cross-device Status", err, codes.NotFound)

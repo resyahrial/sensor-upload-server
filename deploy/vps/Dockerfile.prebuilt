@@ -1,9 +1,11 @@
 # Runtime image from a host cross-compiled binary (deploy/vps/deploy.sh):
 # identical to the final stage of the root Dockerfile, so keep the two in
-# sync. The build context is a temp dir holding `server` (CGO_ENABLED=0,
+# sync. The build context is a temp dir holding `server` and `devicekey` (CGO_ENABLED=0,
 # -trimpath -ldflags="-s -w") and an empty `data/staging`, `data/objects`.
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY server /server
+# Device key admin: docker compose exec server /devicekey set -device ID
+COPY devicekey /devicekey
 # Pre-create /data owned by the nonroot user so named volumes inherit it.
 COPY --chown=65532:65532 data /data
 USER nonroot:nonroot

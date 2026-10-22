@@ -13,16 +13,6 @@ import (
 	"time"
 )
 
-// Supported JWT algorithms.
-const (
-	AlgES256 = "ES256"
-	AlgHS256 = "HS256"
-)
-
-// MinHMACSecretBytes is the minimum JWT_HMAC_SECRET length (256 bits, the
-// HS256 output size; RFC 7518 §3.2).
-const MinHMACSecretBytes = 32
-
 // Storage backends.
 const (
 	BackendFile  = "file"
@@ -86,12 +76,7 @@ type Config struct {
 	QUICIdleTimeout time.Duration
 	QUICKeepAlive   time.Duration
 
-	JWTAlgs          []string
-	JWTPublicKeyFile string
-	JWTHMACSecret    string
-
 	ContentTypes []string
-	DevMode      bool
 	LogLevel     slog.Level
 
 	ShutdownTimeout time.Duration
@@ -134,11 +119,7 @@ func Load(lookup LookupFunc) (Config, error) {
 		GRPCAckEveryN:     int(p.int64("GRPC_ACK_EVERY_N", 1)),
 		QUICIdleTimeout:   p.duration("QUIC_IDLE_TIMEOUT", 60*time.Second),
 		QUICKeepAlive:     p.duration("QUIC_KEEPALIVE", 20*time.Second),
-		JWTAlgs:           p.list("JWT_ALGS", []string{AlgES256}),
-		JWTPublicKeyFile:  p.str("JWT_PUBLIC_KEY_FILE", ""),
-		JWTHMACSecret:     p.str("JWT_HMAC_SECRET", ""),
 		ContentTypes:      p.list("CONTENT_TYPES", DefaultContentTypes),
-		DevMode:           p.boolean("DEV_MODE", false),
 		LogLevel:          p.level("LOG_LEVEL", slog.LevelInfo),
 		ShutdownTimeout:   p.duration("SHUTDOWN_TIMEOUT", 30*time.Second),
 	}
@@ -149,11 +130,6 @@ func Load(lookup LookupFunc) (Config, error) {
 		defDisk = c.ObjStoreLocalDir
 	}
 	c.DiskPath = p.str("DISK_PATH", defDisk)
-	if c.DevMode {
-		if _, set := lookup("LOG_LEVEL"); !set {
-			c.LogLevel = slog.LevelDebug
-		}
-	}
 	errs := append(p.errs, c.validate()...)
 	if len(errs) > 0 {
 		return Config{}, fmt.Errorf("invalid configuration: %w", errors.Join(errs...))
@@ -250,37 +226,11 @@ func (c Config) validate() []error {
 		fail("QUIC_KEEPALIVE (%s) must be shorter than QUIC_IDLE_TIMEOUT (%s)", c.QUICKeepAlive, c.QUICIdleTimeout)
 	}
 
-	if len(c.JWTAlgs) == 0 {
-		fail("JWT_ALGS must list at least one algorithm")
-	}
-	for _, alg := range c.JWTAlgs {
-		switch alg {
-		case AlgES256:
-			if c.JWTPublicKeyFile == "" {
-				fail("JWT_PUBLIC_KEY_FILE is required when JWT_ALGS contains ES256")
-			}
-		case AlgHS256:
-			if !c.DevMode {
-				fail("JWT_ALGS: HS256 is only allowed when DEV_MODE=true")
-			}
-			switch n := len(c.JWTHMACSecret); {
-			case n == 0:
-				fail("JWT_HMAC_SECRET is required when JWT_ALGS contains HS256")
-			case n < MinHMACSecretBytes:
-				fail("JWT_HMAC_SECRET must be at least %d bytes, got %d", MinHMACSecretBytes, n)
-			}
-		default:
-			fail("JWT_ALGS: unsupported algorithm %q (allowed: ES256, HS256)", alg)
-		}
-	}
 	if len(c.ContentTypes) == 0 {
 		fail("CONTENT_TYPES must list at least one content type")
 	}
 	return errs
 }
-
-// HasAlg reports whether alg is enabled in JWT_ALGS.
-func (c Config) HasAlg(alg string) bool { return slices.Contains(c.JWTAlgs, alg) }
 
 // parser reads typed values and accumulates errors.
 type parser struct {

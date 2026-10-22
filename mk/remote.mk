@@ -4,7 +4,8 @@
 # e2e tests"); never part of `make test` or `make test-integration`.
 #
 #   REMOTE_URL=https://203.0.113.7:8443 REMOTE_CA_FILE=certs/server.crt \
-#   REMOTE_HMAC_SECRET=... REMOTE_DEVICE=remote-e2e make e2e-remote
+#   REMOTE_TOKEN=$$(make -s vps-device-key VPS=... VPS_DEVICE=remote-e2e) \
+#   [REMOTE_OTHER_TOKEN=<token of a second device>] make e2e-remote
 #   make e2e-remote RUN=TestRemoteUploadREST       # one test (anchored: ^(RUN)$)
 #   make e2e-remote RUN='TestRemoteUpload.*'       # a group
 #   make e2e-remote-list                           # list the test names

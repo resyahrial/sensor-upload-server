@@ -176,7 +176,7 @@ func (f *fakeFinalizer) callCount() int {
 // fakeVerifier accepts "Bearer dev:<device>".
 type fakeVerifier struct{}
 
-func (fakeVerifier) VerifyHeader(h string) (string, error) {
+func (fakeVerifier) VerifyHeader(_ context.Context, h string) (string, error) {
 	tok, err := auth.BearerToken(h)
 	if err != nil {
 		return "", err
@@ -206,6 +206,12 @@ const testTTL = 7 * 24 * time.Hour
 // adjust the staging before the handlers are built.
 func newFixture(t *testing.T, opts ...func(*Staging)) *fixture {
 	t.Helper()
+	return newFixtureWith(t, fakeVerifier{}, opts...)
+}
+
+// newFixtureWith is newFixture with verifier v instead of fakeVerifier.
+func newFixtureWith(t *testing.T, v Verifier, opts ...func(*Staging)) *fixture {
+	t.Helper()
 	dir := t.TempDir()
 	st, err := NewFileStaging(dir)
 	if err != nil {
@@ -228,7 +234,7 @@ func newFixture(t *testing.T, opts ...func(*Staging)) *fixture {
 			BasePath: ep.base, Protocol: ep.proto,
 			Rules:         meta.Rules{MaxFileBytes: 1 << 20, ContentTypes: []string{"audio/flac"}},
 			IncompleteTTL: testTTL, Staging: st, Repo: repo, Finalizer: fin,
-			Verifier: fakeVerifier{}, Metrics: m, Log: log,
+			Verifier: v, Metrics: m, Log: log,
 		})
 		if err != nil {
 			t.Fatal(err)
