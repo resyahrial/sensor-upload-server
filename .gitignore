@@ -1,0 +1,10 @@
+/bin/
+/data/
+/results/
+*.pem
+*.key
+*.crt
+/certs/
+.env
+coverage.out
+/.claude/

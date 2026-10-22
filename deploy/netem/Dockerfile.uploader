@@ -1,0 +1,27 @@
+# Uploader image for the network-impairment harness (requirements §12).
+# Build from the repo root:
+#   docker build -f deploy/netem/Dockerfile.uploader -t sensor-uploader-netem .
+# Runs as root: tc/ethtool need CAP_NET_ADMIN inside the container's own
+# network namespace (start it with --cap-add NET_ADMIN).
+
+# Builder pinned like the root Dockerfile (go.mod toolchain; tag + digest).
+FROM docker.io/library/golang:1.26.10-alpine@sha256:5cb67f19c5e7994dcb80c074f7cfca8aeeada45bbdca035f73df269cefdcce61 AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+# Copy only Go sources (no root .dockerignore; keeps results/ and data/ out).
+COPY cmd ./cmd
+COPY internal ./internal
+COPY gen ./gen
+# -p 1 and a low GOGC keep the modernc.org/sqlite compile inside a 2 GB VM.
+RUN CGO_ENABLED=0 GOGC=25 go build -p 1 -trimpath -ldflags="-s -w" -o /out/uploader ./cmd/uploader
+
+FROM docker.io/library/alpine:3.22
+# iproute2 (ip, tc + netem distribution tables), ethtool (disable offloads),
+# bash + coreutils (run.sh, timeout), iputils (ping for checks).
+RUN apk add --no-cache iproute2 iproute2-tc ethtool bash coreutils iputils ca-certificates
+COPY --from=build /out/uploader /usr/local/bin/uploader
+COPY deploy/netem/run.sh deploy/netem/netem-lib.sh /netem/
+COPY deploy/netem/profiles/ /netem/profiles/
+RUN chmod +x /netem/run.sh /netem/profiles/*.sh
+ENTRYPOINT ["/netem/run.sh"]

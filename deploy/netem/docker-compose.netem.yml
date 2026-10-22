@@ -1,0 +1,26 @@
+# Network-impairment uploader (requirements §12). Use together with the main
+# compose file; relative paths resolve against deploy/ (the first file's dir):
+#
+#   docker compose -f deploy/docker-compose.yml -f deploy/netem/docker-compose.netem.yml \
+#     run --rm uploader-netem weak-4g -- -protocol rest -url https://server:8443 \
+#     -device netem-0001 -file /results/samples/2MB.bin -ca /certs/ca.pem -state /tmp/u.db
+#
+# The service joins the project's default network (same as the server) and
+# gets its own network namespace, so the netem qdisc on its eth0 shapes only
+# this client's traffic (TCP and UDP/QUIC alike). It is in the "netem"
+# compose profile, so `docker compose up` does not start it.
+services:
+  uploader-netem:
+    build:
+      context: ..
+      dockerfile: deploy/netem/Dockerfile.uploader
+    image: sensor-uploader-netem
+    profiles: ["netem"]
+    cap_add:
+      - NET_ADMIN
+    environment:
+      UPLOADER_TOKEN: ${TOKEN:-}
+    volumes:
+      - ../results:/results
+      - ../certs:/certs:ro
+    command: ["good-4g", "--", "-h"]

@@ -1,0 +1,11 @@
+version: v1
+lint:
+  use:
+    - DEFAULT
+  except:
+    # Chunk/Ack names are fixed by the client contract (sensor-upload-integration.md section 4).
+    - RPC_REQUEST_STANDARD_NAME
+    - RPC_RESPONSE_STANDARD_NAME
+breaking:
+  use:
+    - FILE

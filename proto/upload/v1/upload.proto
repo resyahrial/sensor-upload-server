@@ -1,0 +1,41 @@
+syntax = "proto3";
+package upload.v1;
+
+option go_package = "github.com/resyahrial/sensor-upload-server/gen/upload/v1;uploadv1";
+
+service UploadService {
+  rpc Init(InitRequest) returns (InitResponse);       // start or resume; idempotent per sha256
+  rpc Upload(stream Chunk) returns (stream Ack);      // send chunks, receive committed offsets
+  rpc Status(StatusRequest) returns (StatusResponse); // query offset after a dropped stream
+  rpc Cancel(CancelRequest) returns (CancelResponse);
+}
+
+message InitRequest {
+  string device_id    = 1;
+  string sha256       = 2;
+  int64  size         = 3;
+  string filename     = 4;
+  string content_type = 5;
+  string captured_at  = 6;  // RFC 3339
+  int32  priority     = 7;
+}
+message InitResponse {
+  string upload_id        = 1;
+  int64  committed_offset = 2;  // 0 = new; >0 = resume from here
+  int32  max_chunk_bytes  = 3;  // do not exceed
+}
+
+message Chunk {
+  string upload_id = 1;  // required on every chunk
+  int64  offset    = 2;  // must equal the server's committed offset
+  bytes  data      = 3;  // <= max_chunk_bytes
+}
+message Ack {
+  int64 committed_offset = 1;  // durably stored up to this byte
+  bool  complete         = 2;  // true once SHA-256 is verified
+}
+
+message StatusRequest  { string upload_id = 1; }
+message StatusResponse { int64 committed_offset = 1; int64 size = 2; bool complete = 3; }
+message CancelRequest  { string upload_id = 1; }
+message CancelResponse {}
