@@ -60,6 +60,11 @@ func TestLoadDefaults(t *testing.T) {
 		{"LogLevel", c.LogLevel, slog.LevelInfo},
 		{"ShutdownTimeout", c.ShutdownTimeout, 30 * time.Second},
 		{"S3.ForcePathStyle", c.S3.ForcePathStyle, false},
+		{"RetentionMaxAge", c.RetentionMaxAge, 168 * time.Hour},
+		{"DiskPath", c.DiskPath, "./data/objects"},
+		{"DiskHighWatermark", c.DiskHighWatermark, 85},
+		{"DiskLowWatermark", c.DiskLowWatermark, 70},
+		{"DiskCheckInterval", c.DiskCheckInterval, time.Minute},
 	}
 	for _, ch := range checks {
 		if ch.got != ch.want {
@@ -156,6 +161,13 @@ func TestLoadValidation(t *testing.T) {
 		{"bad metrics addr", with("METRICS_ADDR", "localhost"), "METRICS_ADDR"},
 		{"bad native addr", with("GRPC_NATIVE_ADDR", "9090"), "GRPC_NATIVE_ADDR"},
 		{"keepalive >= idle", with("QUIC_KEEPALIVE", "60s"), "QUIC_KEEPALIVE"},
+		{"negative retention", with("RETENTION_MAX_AGE", "-1h"), "RETENTION_MAX_AGE must not be negative"},
+		{"bad retention", with("RETENTION_MAX_AGE", "7d"), "RETENTION_MAX_AGE"},
+		{"zero disk interval", with("DISK_CHECK_INTERVAL", "0s"), "DISK_CHECK_INTERVAL must be positive"},
+		{"low >= high", with("DISK_LOW_WATERMARK", "85"), "DISK_LOW_WATERMARK (85) must be lower than DISK_HIGH_WATERMARK (85)"},
+		{"high above 100", with("DISK_HIGH_WATERMARK", "101"), "DISK_HIGH_WATERMARK must be between 1 and 100"},
+		{"low zero", with("DISK_LOW_WATERMARK", "0"), "DISK_LOW_WATERMARK must be between 1 and 100"},
+		{"bad watermark", with("DISK_HIGH_WATERMARK", "85%"), "DISK_HIGH_WATERMARK"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -189,6 +201,38 @@ func TestLoadReportsAllErrors(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error missing %s: %v", want, err)
 		}
+	}
+}
+
+func TestRetentionAndDisk(t *testing.T) {
+	tests := []struct {
+		name string
+		env  map[string]string
+		want string // DiskPath
+	}{
+		{"local objstore", with("OBJSTORE_LOCAL_DIR", "/srv/objects"), "/srv/objects"},
+		{"s3 objstore", with("OBJSTORE", "s3", "S3_BUCKET", "b", "S3_REGION", "r", "STAGING_DIR", "/srv/staging"), "/srv/staging"},
+		{"explicit", with("OBJSTORE", "s3", "S3_BUCKET", "b", "S3_REGION", "r", "DISK_PATH", "/minio-data"), "/minio-data"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c, err := Load(env(tt.env))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if c.DiskPath != tt.want {
+				t.Errorf("DiskPath = %q, want %q", c.DiskPath, tt.want)
+			}
+		})
+	}
+
+	c, err := Load(env(with("RETENTION_MAX_AGE", "0", "DISK_HIGH_WATERMARK", "90", "DISK_LOW_WATERMARK", "50",
+		"DISK_CHECK_INTERVAL", "15s")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.RetentionMaxAge != 0 || c.DiskHighWatermark != 90 || c.DiskLowWatermark != 50 || c.DiskCheckInterval != 15*time.Second {
+		t.Errorf("overrides not applied: %+v", c)
 	}
 }
 

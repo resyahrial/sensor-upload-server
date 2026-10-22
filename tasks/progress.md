@@ -79,9 +79,15 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done and merged · `[!]` blocke
 - [x] Fix `wt/fix-grpc` (merged @ 4c37345): finalize detached with a 10 m timeout (stream, Init, Status), per-chunk commit 30 s timeout, Cancel re-checks the row → NOT_FOUND, native MaxConcurrentStreams(100) + MaxHeaderListSize(16 KiB). Each fix has a test that failed before it.
 - [x] Acceptance refresh `wt/accept2` (merged): client-kill `bytes_resent` = 262144 (1 chunk) for grpc-native ×2 and grpc, PASS. very-poor smoke: 64 KiB overhead 1.16–1.34× (was 1.78–3.34×); 256 KiB 2.6–5.75× because of contract-prescribed client timeouts (kept; see decisions)
 - [x] Final gates on `feat/upload-server`: build, vet (default/integration/load), `make test`, `make test-integration INTEGRATION_P=1` (20 packages ok), `make lint`
-- [ ] Full `make experiment` (480 runs, ~12 h, background; results aren't committed)
+- [x] Reduced experiment (REPS=1, no 20 MB on `very-poor`): 88/88 runs succeeded, 14:50–15:40 local. tus resumes cheaply everywhere (overhead ≤ 1.04×). gRPC matches tus up to weak-4g (≤ 1.09×). On very-poor with 256 KiB chunks gRPC costs 2.75× (prefix) / 5.50× (native) and 2–4.5× the time, because of the contract's per-chunk timeout. Results in `results/summary.csv` (not committed); stack stopped, volumes kept.
 - [x] T25 README, `docs/decisions.md`, §15 acceptance review
 - [x] Squash merge `feat/upload-server` → `master`
+
+## Wave 7 — user follow-ups
+- [x] `wt/retention` (merged @ 8b6d960): deletes completed uploads (object + row) older than `RETENTION_MAX_AGE` (168h) every `CLEANUP_INTERVAL`; checks `DISK_PATH` every `DISK_CHECK_INTERVAL` (1m) and deletes oldest first from ≥ 85% until < 70%. Same file can be re-uploaded afterwards. Dev compose defaults to 100/99 (VM disk is shared); VPS uses 85/70 on the MinIO disk.
+- [x] `wt/verify-e2e` (merged @ 8b0f9e9): unauthenticated `GET /files/sha256/{sha256}` over TCP and HTTP/3 (200 status/size/completed_at, 404, 400); 14-test remote suite `test/remote` (`make e2e-remote`, `RUN=TestName`, `make e2e-remote-list`). All 14 pass against a real server.
+- [x] `wt/vps` (merged): `deploy/vps/` single-VPS stack (server + Postgres + MinIO, IP-only self-signed TLS, ES256), `make vps-secrets / vps-bootstrap / vps-deploy / vps-status / vps-logs / vps-token / vps-tunnel / vps-wipe`. Booted locally under podman: all 4 protocols uploaded. Not yet run against a real VPS (bootstrap and the ssh deploy path are untested).
+- [x] Merge wave 7, gates (build, vet ×4 tags, test, integration 21 packages, lint), squash merge to `master`
 
 ## Notes / issues
 - Wave 4 acceptance: the podman VM clock drifted up to 5 h behind the host, causing JWT 401s and MinIO 403s. Fixed by re-stepping the VM clock; documented in the README.

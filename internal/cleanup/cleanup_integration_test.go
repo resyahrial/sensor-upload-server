@@ -120,15 +120,17 @@ func openWithChunk(t *testing.T, ctx context.Context, c uploadv1.UploadServiceCl
 // itEnv is a gRPC service and a cleaner over Postgres, real staging, the
 // real finalizer and a local object store.
 type itEnv struct {
-	pool     *pgxpool.Pool
-	repo     *db.Repo
-	objects  *objstore.Local
-	store    *staging.Store
-	stageDir string
-	svc      *grpcapi.Service
-	client   uploadv1.UploadServiceClient
-	metrics  *obs.Metrics
-	cleaner  *Cleaner
+	pool    *pgxpool.Pool
+	repo    *db.Repo
+	objects *objstore.Local
+	// objectsDir is the root of objects.
+	objectsDir string
+	store      *staging.Store
+	stageDir   string
+	svc        *grpcapi.Service
+	client     uploadv1.UploadServiceClient
+	metrics    *obs.Metrics
+	cleaner    *Cleaner
 }
 
 func newITEnv(t *testing.T) *itEnv {
@@ -143,7 +145,8 @@ func newITEnv(t *testing.T) *itEnv {
 		t.Fatal(err)
 	}
 	repo := db.NewRepo(pool)
-	objects, err := objstore.NewLocal(t.TempDir())
+	objectsDir := t.TempDir()
+	objects, err := objstore.NewLocal(objectsDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -196,7 +199,7 @@ func newITEnv(t *testing.T) *itEnv {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &itEnv{pool: pool, repo: repo, objects: objects, store: store, stageDir: stageDir,
+	return &itEnv{pool: pool, repo: repo, objects: objects, objectsDir: objectsDir, store: store, stageDir: stageDir,
 		svc: svc, client: client, metrics: metrics, cleaner: cleaner}
 }
 
@@ -314,6 +317,12 @@ func staged(t *testing.T, dir, id string) bool {
 func (e *itEnv) fullyCommitted(t *testing.T) (string, []byte) {
 	t.Helper()
 	data, req := initReq(t, 3*chunkSize)
+	return e.fullyCommittedWith(t, data, req), data
+}
+
+// fullyCommittedWith is fullyCommitted for a given file.
+func (e *itEnv) fullyCommittedWith(t *testing.T, data []byte, req *uploadv1.InitRequest) string {
+	t.Helper()
 	res, err := e.client.Init(authCtx(t), req)
 	if err != nil {
 		t.Fatal(err)
@@ -340,7 +349,7 @@ func (e *itEnv) fullyCommitted(t *testing.T) (string, []byte) {
 	if err := e.repo.UpdateCommitted(context.Background(), GRPCProtocol, id, int64(len(data))); err != nil {
 		t.Fatal(err)
 	}
-	return id, data
+	return id
 }
 
 // TestFinalizeFullyCommittedGRPC: a fully committed upload is finalized by

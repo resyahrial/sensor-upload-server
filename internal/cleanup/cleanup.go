@@ -9,6 +9,10 @@
 //
 // Uploads that are in use (a tus request holds the lock, or a gRPC stream
 // holds the upload) are skipped.
+//
+// Retention (retention.go) deletes completed uploads, object and row,
+// once they are older than RETENTION_MAX_AGE and, oldest first, whenever
+// the DISK_PATH filesystem is above DISK_HIGH_WATERMARK.
 package cleanup
 
 import (

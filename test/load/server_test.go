@@ -98,6 +98,10 @@ func startServer(t *testing.T) *server {
 		"JWT_HMAC_SECRET":    hmacSecret,
 		"MAX_FILE_BYTES":     strconv.FormatInt(max(cfg.FileSize, 500<<20), 10),
 		"SHUTDOWN_TIMEOUT":   "10s",
+		// The developer's disk may be past 85%: no disk-pressure deletes
+		// of the uploads under test.
+		"DISK_HIGH_WATERMARK": "100",
+		"DISK_LOW_WATERMARK":  "99",
 		"GOMAXPROCS":         strconv.Itoa(cfg.ServerProcs),
 		"HOME":               dir,
 		"PATH":               os.Getenv("PATH"),

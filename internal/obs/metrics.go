@@ -13,6 +13,20 @@ const (
 	ReasonInternal  = "internal"
 )
 
+// Results for Metrics.FileLookups.
+const (
+	LookupFound    = "found"
+	LookupNotFound = "not_found"
+	LookupInvalid  = "invalid"
+	LookupError    = "error"
+)
+
+// Reasons for Metrics.RetentionDeleted.
+const (
+	RetentionAge  = "age"  // completed longer than RETENTION_MAX_AGE ago
+	RetentionDisk = "disk" // disk usage at or above DISK_HIGH_WATERMARK
+)
+
 // Metrics holds every upload metric from requirements §10. All upload metrics are
 // labelled by protocol; Failed is additionally labelled by reason.
 type Metrics struct {
@@ -29,6 +43,15 @@ type Metrics struct {
 	// StagingOrphans counts uploads whose leftover staged files the
 	// cleaner deleted, labelled by staging area ("grpc" or "tus").
 	StagingOrphans *prometheus.CounterVec
+	// FileLookups counts GET /files/sha256/{sha256} requests, labelled by
+	// result (one of the Lookup* constants).
+	FileLookups *prometheus.CounterVec
+	// RetentionDeleted counts completed uploads (object and row) deleted
+	// by retention, labelled by reason (RetentionAge, RetentionDisk).
+	RetentionDeleted *prometheus.CounterVec
+	// DiskUsedRatio is the used fraction (0..1) of DISK_PATH's
+	// filesystem at the last disk check.
+	DiskUsedRatio prometheus.Gauge
 }
 
 // NewMetrics creates the upload metrics and registers them with reg.
@@ -75,11 +98,20 @@ func NewMetrics(reg prometheus.Registerer) (*Metrics, error) {
 		StagingOrphans: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "staging_orphans_deleted_total", Help: "Uploads whose leftover staged files (terminal or unknown row) were deleted.",
 		}, []string{"staging"}),
+		FileLookups: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "file_lookups_total", Help: "Public \"is this file saved?\" lookups by sha256, by result.",
+		}, []string{"result"}),
+		RetentionDeleted: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "uploads_retention_deleted_total", Help: "Completed uploads deleted by retention (object and row), by reason (age, disk).",
+		}, []string{"reason"}),
+		DiskUsedRatio: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "disk_used_ratio", Help: "Used fraction of the DISK_PATH filesystem (as df: used / (used + available)) at the last check.",
+		}),
 	}
 	for _, c := range []prometheus.Collector{
 		m.Started, m.Completed, m.Failed, m.Resumes, m.BytesReceived,
 		m.ChunkBytes, m.Duration, m.FinalizeDuration, m.InProgress, m.GRPCStreamResets,
-		m.StagingOrphans,
+		m.StagingOrphans, m.FileLookups, m.RetentionDeleted, m.DiskUsedRatio,
 	} {
 		if err := reg.Register(c); err != nil {
 			return nil, err

@@ -10,6 +10,9 @@ const (
 	PrefixREST      = "/rest/files/"
 	PrefixRESTHTTP3 = "/rest-http3/"
 	PrefixGRPC      = "/grpc/"
+	// PrefixFiles is the public, unauthenticated file lookup
+	// (GET /files/sha256/{sha256}, internal/fileapi).
+	PrefixFiles = "/files/sha256/"
 )
 
 // RouterConfig configures the public TLS TCP router.
@@ -22,6 +25,8 @@ type RouterConfig struct {
 	// prefix stripped (so grpc.Server.ServeHTTP sees
 	// /upload.v1.UploadService/...). nil = gRPC not mounted (404).
 	GRPC http.Handler
+	// Files, when non-nil, serves /files/sha256/ (mounted as-is).
+	Files http.Handler
 	// AltSvc is the Alt-Svc header value advertising HTTP/3, e.g.
 	// `h3=":8443"`; empty = no header.
 	AltSvc string
@@ -29,7 +34,8 @@ type RouterConfig struct {
 
 // NewRouter returns the TCP listener's handler: /rest/files/ → tus,
 // /rest-http3/* → 404 (that endpoint is HTTP/3 only, so misrouted clients
-// fail loudly), /grpc/ → gRPC (if configured), everything else 404. Every
+// fail loudly), /grpc/ → gRPC (if configured), /files/sha256/ → file
+// lookup (if configured), everything else 404. Every
 // response carries Alt-Svc.
 func NewRouter(cfg RouterConfig) http.Handler {
 	mux := http.NewServeMux()
@@ -37,6 +43,9 @@ func NewRouter(cfg RouterConfig) http.Handler {
 		mux.Handle(PrefixREST, cfg.REST)
 	}
 	mux.Handle(PrefixRESTHTTP3, http.NotFoundHandler())
+	if cfg.Files != nil {
+		mux.Handle(PrefixFiles, cfg.Files)
+	}
 	var grpc http.Handler
 	if cfg.GRPC != nil {
 		grpc = http.StripPrefix(strings.TrimSuffix(PrefixGRPC, "/"), cfg.GRPC)

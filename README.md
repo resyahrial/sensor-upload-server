@@ -8,11 +8,14 @@ protocols with the same rules:
 | `/rest/files/` | tus 1.0 (creation, termination, expiration) | HTTPS, HTTP/1.1 or HTTP/2 over TCP |
 | `/rest-http3/files/` | tus 1.0 | HTTP/3 over QUIC (UDP, same port as TCP) |
 | `/grpc/upload.v1.UploadService/*` | gRPC (`Init`, `Upload` bidi stream, `Status`, `Cancel`) | HTTP/2 over the TLS TCP listener (`/grpc` prefix stripped), plus an optional native gRPC listener |
+| `GET /files/sha256/{sha256}` | "Is this file saved?" lookup, JSON, **no authentication** | HTTPS (HTTP/1.1, HTTP/2) and HTTP/3, same port |
 
 Every protocol only receives bytes into a staging area. One shared
 **finalizer** verifies the SHA-256, deduplicates by sha256, moves the file to
 the object store (local disk or S3/MinIO) and records it in PostgreSQL. An
-expiry cleaner removes incomplete uploads after `INCOMPLETE_TTL`.
+expiry cleaner removes incomplete uploads after `INCOMPLETE_TTL`; retention
+deletes completed uploads after `RETENTION_MAX_AGE` or when the disk passes
+`DISK_HIGH_WATERMARK`.
 
 The client contract is [`sensor-upload-integration.md`](sensor-upload-integration.md);
 the server requirements are [`upload-server-requirements.md`](upload-server-requirements.md).
@@ -23,7 +26,8 @@ evidence in [`docs/acceptance.md`](docs/acceptance.md).
 
 ```
 TLS TCP :8443 ── router ── /rest/files/*        → tusd handler ─┐
-                        └─ /grpc/* (gRPC, strip) → UploadService ┤
+                        ├─ /grpc/* (gRPC, strip) → UploadService ┤
+                        └─ GET /files/sha256/{h} → file lookup (also on QUIC; reads Postgres)
 QUIC UDP :8443 ─────────── /rest-http3/files/*  → tusd handler ─┤──→ staging (STAGING_DIR)
 native gRPC :9090 ───────── bare + /grpc paths  → UploadService ┘        │
                                                                     finalizer
@@ -49,10 +53,12 @@ internal/       app, auth, cleanup, client, config, db, finalize, grpcadapt, grp
                 grpcprefix, httpx, meta, objstore, obs, staging, tusapi
 proto/, gen/    upload.v1 proto and generated Go code (buf)
 migrations/     goose migrations (embedded, applied at startup)
-deploy/         docker-compose.yml (server, Postgres, MinIO), netem/ (experiment harness)
+deploy/         docker-compose.yml (dev stack: server, Postgres, MinIO), netem/ (experiment harness),
+                vps/ (single-VPS deployment: compose, gen-secrets.sh, bootstrap.sh, deploy.sh)
 test/e2e        in-process end-to-end tests (integration tag)
 test/load       NFR-2 / NFR-3 load tests (load tag)
-mk/             extra make targets (proto, experiment, load tests, uploader)
+test/remote     manually run e2e suite against a running server, e.g. a VPS (remote tag)
+mk/             extra make targets (proto, experiment, load tests, uploader, e2e-remote, vps-*)
 docs/           decisions.md, acceptance.md
 ```
 
@@ -89,6 +95,8 @@ bin/uploader -protocol grpc-native -url localhost:19090 -token "$TOKEN" -device 
   -ca certs/server.crt -file sample.flac -state native.db -report native.csv
 
 curl -s localhost:19100/readyz          # {"status":"ok","checks":{"postgres":"ok",...}}; also /healthz, /metrics
+# Is the file saved? (no token; the hash is what the client queued)
+curl -s --cacert certs/server.crt https://localhost:18443/files/sha256/$(shasum -a 256 sample.flac | cut -d' ' -f1)
 make down
 ```
 
@@ -110,6 +118,36 @@ Other useful uploader flags: `-dir` + `-concurrency N`, `-chunk` (default
 `-insecure`, `-v`. The token can also come from `$UPLOADER_TOKEN`. Run
 `bin/uploader -h` for the full list. Re-running with the same `-state` DB
 resumes an interrupted upload.
+
+## File lookup (`GET /files/sha256/{sha256}`)
+
+Answers "is this file already saved?" for a sensor, gateway or operator,
+without a token.
+
+| Request | Response |
+|---|---|
+| `{sha256}` is 64 lowercase hex and a **completed** upload has it | `200` `{"sha256":"…","status":"completed","size":2097152,"completed_at":"2026-10-22T08:57:32Z"}` |
+| no completed upload (unknown, still uploading, failed, cancelled, expired) | `404` `{"sha256":"…","status":"not_found"}` |
+| anything else as `{sha256}` (uppercase, wrong length, non-hex) | `400` `{"error":"sha256 must be 64 lowercase hex characters"}` |
+| other method | `405`; database error → `500` `{"error":"internal error"}` |
+
+Every answer carries `Cache-Control: no-store`. `completed_at` is RFC 3339
+in UTC. Served on the TLS TCP listener (HTTP/1.1, HTTP/2) and on HTTP/3.
+Metric `file_lookups_total{result="found|not_found|invalid|error"}`, one
+`file lookup` log line per request (an invalid value is logged by length
+only). The uploader has no verify mode; use curl (`--cacert certs/server.crt`,
+or `-k` for an IP-only self-signed certificate you do not have):
+
+```sh
+curl -s --cacert certs/server.crt https://<host>:<port>/files/sha256/<hex>
+```
+
+**Security:** the endpoint is unauthenticated by design. It discloses only
+whether a file with a given sha256 is stored (plus its size and completion
+time); never the device, filename, object key, metadata or in-progress
+uploads. Anyone who already has a file (or guesses its hash) can therefore
+learn that it was uploaded. There is no rate limit; put it behind a reverse
+proxy limit or firewall if that matters (see future work).
 
 ## Configuration
 
@@ -133,7 +171,12 @@ All problems are reported together and the server exits 1.
 | `S3_FORCE_PATH_STYLE` | `false` | Path-style addressing (needed for MinIO) |
 | `MAX_FILE_BYTES` | `524288000` | Maximum file size (500 MB) |
 | `INCOMPLETE_TTL` | `168h` | Incomplete uploads idle longer than this are expired |
-| `CLEANUP_INTERVAL` | `1h` | Expiry cleaner period (first pass at startup) |
+| `CLEANUP_INTERVAL` | `1h` | Expiry cleaner and age-retention period (first pass at startup) |
+| `RETENTION_MAX_AGE` | `168h` | Completed uploads (object and row) older than this are deleted; `0` disables |
+| `DISK_PATH` | `OBJSTORE_LOCAL_DIR` if `OBJSTORE=local`, else `STAGING_DIR` | Filesystem watched for disk pressure; with MinIO on the same host, mount MinIO's host data dir and point this at it |
+| `DISK_HIGH_WATERMARK` | `85` | Used-space percent at which the oldest completed uploads are deleted (1–100) |
+| `DISK_LOW_WATERMARK` | `70` | Deletion stops below this percent; must be lower than the high watermark |
+| `DISK_CHECK_INTERVAL` | `1m` | Disk usage check period (first check at startup) |
 | `GRPC_MAX_CHUNK_BYTES` | `262144` | Maximum gRPC chunk, returned in `InitResponse` |
 | `GRPC_ACK_EVERY_N` | `1` | gRPC ack frequency (every N-th chunk; the final chunk always) |
 | `QUIC_IDLE_TIMEOUT` | `60s` | QUIC max idle timeout |
@@ -146,6 +189,24 @@ All problems are reported together and the server exits 1.
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
 | `SHUTDOWN_TIMEOUT` | `30s` | Graceful drain budget for all listeners on SIGTERM |
 
+### Retention and disk pressure
+
+This is a test server, so finished files are not kept forever. Every
+`CLEANUP_INTERVAL`, completed uploads older than `RETENTION_MAX_AGE` (7 days)
+are deleted: the object (local or S3) first, then the database row, so the
+same file can be uploaded again afterwards. Every `DISK_CHECK_INTERVAL`, the
+server measures `DISK_PATH` (statfs, the same `Use%` as df). At or above
+`DISK_HIGH_WATERMARK` it deletes the oldest completed uploads, re-measuring
+after each one, until usage is below `DISK_LOW_WATERMARK`. It logs a warning
+if nothing completed is left to delete, or if deleting did not lower usage
+(`DISK_PATH` is not the objects' disk). In-progress uploads are never
+touched; expiry handles them. With MinIO on the same host, bind-mount the
+host's MinIO data directory into the server container and set `DISK_PATH` to
+it: the percentage is then that of the disk MinIO and staging share. Metrics:
+`uploads_retention_deleted_total{reason="age"|"disk"}`, `disk_used_ratio`.
+Deletes run in batches of 500, with one info log line (`retention batch`) per
+batch.
+
 Tokens: `exp` and a `device_id` claim are required, leeway 120 s, `iat`/`nbf`
 are checked when present.
 
@@ -156,8 +217,9 @@ are checked when present.
 | `make test` | Unit tests with coverage (`go test -cover ./...`) |
 | `make test-integration` | Everything with `-tags integration`: Postgres and MinIO via testcontainers-go, in-process e2e for all protocols incl. server restart |
 | `make load-test` | NFR-2 / NFR-3 load tests (see below) |
-| `make lint` | `go vet` and staticcheck, default and `integration` tags |
+| `make lint` | `go vet` and staticcheck, default and `integration` tags, plus `test/remote` (`remote` tag) |
 | `make lint-load` | Same for the `load`-tagged files |
+| `make e2e-remote` | Manual e2e suite against a running server (see "Remote e2e tests") |
 | `make proto` | `buf lint` + `buf generate` into `gen/` |
 | `make build` | Static binaries into `bin/` |
 
@@ -192,6 +254,53 @@ Knobs: `LOAD_FILES`, `LOAD_FILE_SIZE`, `LOAD_CHUNK`, `LOAD_RSS_LIMIT` (300MB),
 Results are in `docs/acceptance.md` ("NFR-2 / NFR-3 memory and concurrency"):
 rest and rest-http3 pass; grpc currently fails both (see known limitations).
 Keep the host awake during a run (`caffeinate -i make load-test …` on macOS).
+
+## Remote e2e tests
+
+`test/remote` (build tag `remote`) runs against an **already running**
+server, e.g. a VPS, and never runs in `make test` or `make test-integration`.
+Every run uploads fresh random content (~300 KiB, 64 KiB chunks), so reruns
+do not collide. Without `REMOTE_URL` every test skips.
+
+```sh
+export REMOTE_URL=https://203.0.113.7:8443        # TLS listener (tus, /grpc, file lookup)
+export REMOTE_GRPC_NATIVE=203.0.113.7:9090        # optional; native gRPC tests skip without it
+export REMOTE_ADMIN_URL=http://203.0.113.7:9100   # optional; /healthz + /readyz
+export REMOTE_CA_FILE=certs/server.crt            # the server's (IP-only) self-signed cert, or REMOTE_INSECURE=1
+export REMOTE_HMAC_SECRET=... REMOTE_DEVICE=remote-e2e   # dev server with HS256; or see below
+
+make e2e-remote                                   # all tests
+make e2e-remote RUN=TestRemoteUploadREST          # one test (RUN is anchored: ^(RUN)$)
+make e2e-remote RUN='TestRemoteUpload.*|TestRemoteHealth'
+make e2e-remote-list                              # list the test names
+```
+
+Tokens: `REMOTE_HMAC_SECRET` (HS256) or `REMOTE_JWT_KEY` (PEM P-256 private
+key, ES256) with `REMOTE_DEVICE` mints tokens for `REMOTE_DEVICE` and
+`REMOTE_DEVICE-other`. Alternatively `REMOTE_TOKEN` is a fixed device JWT
+(`REMOTE_DEVICE` defaults to its `device_id` claim) and `REMOTE_OTHER_TOKEN`
+an optional second device; without a second device the cross-device subtest
+skips. `REMOTE_TIMEOUT` (default 15m) is the `go test -timeout`. The raw gRPC
+tests wait for an ack per chunk, so the server must run with the default
+`GRPC_ACK_EVERY_N=1`. Uploads a test leaves unfinished are cancelled
+(tus `DELETE`, gRPC `Cancel`) when it ends.
+
+| Test | Checks |
+|---|---|
+| `TestRemoteHealth` | Public TLS listener answers (lookup → 404); with `REMOTE_ADMIN_URL`, `/healthz` and `/readyz` are `ok` |
+| `TestRemoteUploadREST` | Contract client (`internal/client`) uploads over tus/HTTP/2; lookup → 200 with sha256 and size |
+| `TestRemoteUploadRESTHTTP3` | Same over tus/HTTP/3 (UDP must be open) |
+| `TestRemoteUploadGRPC` | Same over gRPC with the `/grpc` prefix on the TLS listener |
+| `TestRemoteUploadGRPCNative` | Same on the native gRPC listener |
+| `TestRemoteResumeREST` | tus: one chunk, a PATCH dropped mid-body, `HEAD` on a new connection gives the kept offset, finish from it |
+| `TestRemoteResumeRESTHTTP3` | Same over HTTP/3 |
+| `TestRemoteResumeGRPC` | gRPC: stream dropped after 2 acks; second `Init` returns the same `upload_id` and `committed_offset`, `Status` agrees, finish |
+| `TestRemoteResumeGRPCNative` | Same on the native listener |
+| `TestRemoteDuplicate` | After a completed upload: tus POST (TCP and HTTP/3) → 461, gRPC `Init` → `ALREADY_EXISTS`, client reports `duplicate` |
+| `TestRemoteBadToken` | Missing, garbage and wrongly signed tokens → 401 / `UNAUTHENTICATED` (tus TCP + HTTP/3, gRPC, native) |
+| `TestRemoteCrossDevice` | Metadata `device_id` ≠ token → 403 / `PERMISSION_DENIED`; another device's upload → 404 (tus HEAD/PATCH/DELETE) / `NOT_FOUND` (gRPC Status/Cancel), owner unaffected |
+| `TestRemoteVerifyNotFound` | Random hash → 404 `not_found`; uppercase, short, long, non-hex → 400 |
+| `TestRemoteMetadataValidation` | Bad sha256, captured_at, priority, content type, missing filename → 400; gRPC → `INVALID_ARGUMENT`; nothing stored |
 
 ## Protocol experiment
 
@@ -247,6 +356,181 @@ One row per `protocol, profile, size, chunk` (sizes and chunks in bytes):
 Medians and p95 (nearest rank) are over successful runs only; a cell with no
 success has empty statistics. Per-run rows are in `results/runs/*.csv`
 (§11 uploader columns plus `run_id, profile, rep, exit_code`).
+
+## Deploy to a VPS
+
+`deploy/vps/` runs the server, PostgreSQL and MinIO on one VPS with Docker
+Compose, reachable by IP with a self-signed CA. It is meant for test and
+experiment servers, not production. Design notes are in `docs/decisions.md`
+"Decisions (vps)".
+
+What runs there: `DEV_MODE` off, JWT **ES256 only** (the VPS gets only
+`jwt.pub`; tokens are signed on your machine), random Postgres/MinIO
+credentials, and a bucket-scoped MinIO user for the server. Restart policies,
+healthchecks, json-file log rotation (10 MB × 5) and memory limits sized for
+a 2–4 GB VPS (server 1 GB with `GOMEMLIMIT=800MiB`, MinIO 768 MB, Postgres
+512 MB). Data is in bind mounts under `/srv/sensor-upload/{pgdata,minio,staging}`,
+so `df`/`du` on the host show it.
+
+| Port | Exposure | What |
+|---|---|---|
+| 443/tcp + 443/udp | public | TLS: `/rest/files/`, `/grpc/...` (TCP) and `/rest-http3/files/` (QUIC) |
+| 9090/tcp | public | native gRPC (TLS) |
+| 9100/tcp | `127.0.0.1` | admin: `/metrics`, `/healthz`, `/readyz` (plain HTTP) |
+| 9001/tcp | `127.0.0.1` | MinIO console |
+| Postgres 5432, MinIO S3 9000 | not published | compose network only |
+
+### Prerequisites
+
+- A VPS running Ubuntu 24.04 LTS (Debian 12 works too) with root SSH access
+  (key-based), 2–4 GB RAM, amd64 or arm64.
+- On your machine: Go (see Quick start), `openssl`, `rsync`, `ssh`, and
+  docker or podman (only for `build` and `save`; nothing is compiled inside
+  a container).
+
+### Steps
+
+```sh
+VPS_IP=203.0.113.10                      # your VPS public IP
+
+# 1. Secrets, on your machine, into deploy/vps/secrets/ (git-ignored):
+#    ca.crt/ca.key, server.crt/key (SAN IP:$VPS_IP), jwt.key/jwt.pub (ES256), .env.
+#    Re-running keeps existing files. VPS_SAN=IP:...,DNS:... adds SANs.
+make vps-secrets VPS_IP=$VPS_IP
+
+# 2. One-time VPS setup as root: Docker Engine + compose plugin (Docker's apt repo),
+#    /srv/sensor-upload dirs, ufw (22/tcp, 443/tcp, 443/udp, 9090/tcp), QUIC UDP
+#    buffer sysctls (rmem_max/wmem_max = 7500000, /etc/sysctl.d). Safe to re-run.
+make vps-bootstrap VPS=root@$VPS_IP      # VPS_DEPLOY_USER=ubuntu to deploy as a docker-group user
+
+# 3. Deploy: cross-compiles cmd/server for linux/amd64 (VPS_ARCH=arm64 for ARM),
+#    builds the image from deploy/vps/Dockerfile.prebuilt, docker save | ssh docker load,
+#    rsyncs docker-compose.yml + .env + certs (not ca.key/jwt.key), docker compose up -d,
+#    and waits for /readyz.
+make vps-deploy VPS=root@$VPS_IP
+
+make vps-status VPS=root@$VPS_IP         # compose ps, /readyz, disk usage, images
+make vps-logs   VPS=root@$VPS_IP SERVICE=server FOLLOW=1
+make vps-tunnel VPS=root@$VPS_IP         # localhost:9100 (admin), localhost:9001 (MinIO console)
+make vps-down   VPS=root@$VPS_IP         # stop; data is kept
+make vps-wipe   VPS=root@$VPS_IP         # stop and delete all data (asks you to type the host)
+```
+
+`VPS_SSH_OPTS="-p 2222 -i ~/.ssh/vps"` is passed to ssh and rsync, and
+`VPS_SSH_PORT` sets the port ufw allows. If `VPS` is an ssh alias, also set
+`VPS_IP`. Tuning (`LOG_LEVEL`, `MAX_FILE_BYTES`, `INCOMPLETE_TTL`,
+`CLEANUP_INTERVAL`, retention and disk watermarks) is in
+`deploy/vps/secrets/.env`. Edit it and run `make vps-deploy` again.
+
+Retention / disk pressure: `RETENTION_MAX_AGE=168h`, `DISK_HIGH_WATERMARK=85`,
+`DISK_LOW_WATERMARK=70`, `DISK_CHECK_INTERVAL=1m`. `DISK_PATH=/data/disk` is
+the MinIO data directory (`/srv/sensor-upload/minio`, mounted read-only into
+the server), so the watermarks follow the filesystem that holds the stored
+objects.
+
+### Connecting clients
+
+Clients trust `deploy/vps/secrets/ca.crt` (the CA, not the server
+certificate). The certificate is valid for the IP only (plus any `VPS_SAN`),
+so connect by IP.
+
+```sh
+TOKEN=$(make -s vps-token VPS_DEVICE=dev-1)       # ES256, VPS_TOKEN_TTL=24h by default
+CA=deploy/vps/secrets/ca.crt
+
+bin/uploader -protocol rest        -url https://$VPS_IP -token "$TOKEN" -device dev-1 -ca $CA -file a.flac -state rest.db
+bin/uploader -protocol rest-http3  -url https://$VPS_IP -token "$TOKEN" -device dev-1 -ca $CA -file b.flac -state h3.db
+bin/uploader -protocol grpc        -url https://$VPS_IP -token "$TOKEN" -device dev-1 -ca $CA -file c.flac -state grpc.db
+bin/uploader -protocol grpc-native -url $VPS_IP:9090    -token "$TOKEN" -device dev-1 -ca $CA -file d.flac -state native.db
+curl -s -o /dev/null -w '%{http_code}\n' --cacert $CA https://$VPS_IP/rest/files/   # 401 = TLS ok, token required
+```
+
+| Protocol | URL |
+|---|---|
+| tus over HTTP/1.1–2 | `https://<ip>/rest/files/` |
+| tus over HTTP/3 (UDP 443) | `https://<ip>/rest-http3/files/` |
+| gRPC, `/grpc` prefix | `<ip>:443` (method path `/grpc/upload.v1.UploadService/...`) |
+| gRPC, native | `<ip>:9090` (bare or `/grpc` paths) |
+
+Because the container listens on 443 itself, `Alt-Svc` advertises
+`h3=":443"` (contract deviation 10 does not apply here).
+
+### Experiment and remote e2e against the VPS
+
+The netem experiment runs the shaped uploader containers on your machine
+and points them at the VPS. They only need internet access, so use the
+runtime's default network. Shaping is added on top of the real path to the VPS:
+
+```sh
+TOKEN=$(make -s vps-token VPS_DEVICE=netem-0001 VPS_TOKEN_TTL=48h)   # must outlive the run
+make experiment-smoke SERVER_URL=https://$VPS_IP GRPC_NATIVE_URL=$VPS_IP:9090 \
+  TOKEN="$TOKEN" CA_FILE=deploy/vps/secrets/ca.crt NETEM_NETWORK=podman   # docker: bridge
+```
+
+Remote end-to-end suite (`make e2e-remote`):
+
+```sh
+make e2e-remote REMOTE_URL=https://$VPS_IP REMOTE_GRPC_NATIVE=$VPS_IP:9090 \
+  REMOTE_TOKEN="$(make -s vps-token VPS_DEVICE=e2e-remote)" REMOTE_CA_FILE=deploy/vps/secrets/ca.crt
+```
+
+Tokens are checked against the VPS clock (120 s leeway). If you get 401s,
+compare `date -u` locally and on the VPS. When the client runs in a podman
+VM, check the VM clock too (see known limitations).
+
+### Backups
+
+Nothing is backed up automatically. For a test server, the simple way is to
+stop the stack and copy the data:
+`make vps-down`, then `tar` or `rsync` `/srv/sensor-upload` as root (pgdata is
+owned by uid 70), then `make vps-deploy`. While the stack is running, use
+`docker compose exec postgres pg_dump -U upload upload > upload.sql` (in
+`/srv/sensor-upload`) and `mc mirror` for the bucket. Keep `deploy/vps/secrets/`
+(CA key, JWT key, `.env`) somewhere safe. Without it you cannot issue tokens
+or renew the certificate for existing clients.
+
+### Security notes
+
+- **Self-signed CA.** Clients must pin `ca.crt`; never use `-insecure` against
+  the VPS. `ca.key` and `jwt.key` stay on your machine. Anyone holding
+  `jwt.key` can mint tokens for any device.
+- **Firewall.** ufw allows only SSH, 443/tcp, 443/udp and 9090/tcp. Docker
+  publishes ports through its own iptables rules, which **bypass ufw**. So
+  the compose file publishes nothing else on public interfaces: the admin
+  port and the MinIO console are bound to `127.0.0.1` (use `make vps-tunnel`),
+  and Postgres and MinIO S3 are not published at all. Keep it that way when
+  adding `ports:`.
+- **`GET /files/sha256/{sha256}` has no auth**: anyone who can reach the
+  server can ask whether a file with a given hash exists. Accept that on a test
+  server, or restrict 443/9090 to known client IPs with your provider's
+  firewall.
+- The docker group is root-equivalent on the VPS. `server.key` is mode 640 with
+  group 65532 (the container user) in a setgid `certs/` directory, and `.env`
+  is mode 600.
+- No rate limiting or per-device quotas (see known limitations).
+  `DISK_HIGH_WATERMARK` and the expiry cleaner are what keep the disk from
+  filling up.
+
+### Upgrading
+
+- New server version: update your checkout and run `make vps-deploy`. Each
+  deploy loads a new image tag `localhost/sensor-upload-server:vps-<commit>-<time>`,
+  retags it as `:vps` and recreates only the server container. Migrations
+  run at startup. The three newest tags stay on the VPS for rollback:
+  `docker tag localhost/sensor-upload-server:vps-<old> localhost/sensor-upload-server:vps && docker compose up -d`
+  (on the VPS, in `/srv/sensor-upload`).
+- New IP, or the certificate is about to expire (397 days):
+  `make vps-secrets VPS_IP=<ip> VPS_SECRETS_ARGS=--renew-cert` re-signs the
+  server certificate with the same CA, so clients keep working. Then run
+  `make vps-deploy`, which restarts the server when certificates change.
+- Postgres/MinIO image upgrades: bump the tags in
+  `deploy/vps/docker-compose.yml` and run `make vps-deploy`. A Postgres major
+  upgrade needs a dump and restore (or `make vps-wipe` on a test server).
+- `VPS_SECRETS_ARGS=--force` regenerates everything, including the CA (clients
+  need the new `ca.crt`) and `.env`. The new passwords no longer match the
+  existing pgdata/MinIO data, so only use it together with `make vps-wipe`.
+- OS updates: `apt-get upgrade` on the VPS. Containers restart with Docker
+  (`restart: unless-stopped`).
 
 ## Contract deviations
 
@@ -351,12 +635,22 @@ Differences from `sensor-upload-integration.md` and the requirements:
   `DEV_MODE=true` with HS256, default Postgres/MinIO credentials and a
   plain-HTTP admin port, and publishes on `127.0.0.1` by default. For a real
   deployment use ES256 only, real credentials and `METRICS_ADDR` reachable
-  only from the scraper.
+  only from the scraper, as `deploy/vps` does (see "Deploy to a VPS").
 - **No per-device quota on in-progress uploads.** An authenticated device can
   create many uploads (each up to the size limit) and fill `STAGING_DIR` until
   they expire. Only the global size limit and expiry bound it.
-- Single instance only: the tus locker, gRPC stream registry and cleaner are
-  in-process.
+- **`GET /files/sha256/{sha256}` is unauthenticated and not rate limited.**
+  It reveals whether a file with a given hash is stored (and its size and
+  completion time), nothing else. Each request is one indexed Postgres
+  lookup, so a flood costs DB connections.
+- **Retention deletes for good.** Completed files are deleted after
+  `RETENTION_MAX_AGE`, or earlier under disk pressure (oldest first); there is
+  no archive. With `OBJSTORE=s3` on a remote bucket, set `DISK_PATH` to a disk
+  that the objects actually fill (or raise the watermarks to 100/99): the
+  default `STAGING_DIR` is filled by in-progress uploads, which retention
+  cannot free. Retention stops after a batch that frees nothing and warns.
+- Single instance only: the tus locker, gRPC stream registry, cleaner and
+  retention are in-process.
 
 ## Future work
 
@@ -373,3 +667,6 @@ Ideas only, not implemented:
 - Per-device limits on in-progress uploads and staged bytes (count and total
   size), returning `429`/`RESOURCE_EXHAUSTED`.
 - Run the experiment with ingress shaping (ifb) and the 200 MB size.
+- A per-IP rate limit on the unauthenticated `GET /files/sha256/{sha256}`
+  (nothing reusable exists in the codebase yet; today rely on a reverse
+  proxy or firewall).

@@ -27,6 +27,7 @@ import (
 	"github.com/resyahrial/sensor-upload-server/internal/cleanup"
 	"github.com/resyahrial/sensor-upload-server/internal/config"
 	"github.com/resyahrial/sensor-upload-server/internal/db"
+	"github.com/resyahrial/sensor-upload-server/internal/fileapi"
 	"github.com/resyahrial/sensor-upload-server/internal/finalize"
 	"github.com/resyahrial/sensor-upload-server/internal/grpcadapt"
 	"github.com/resyahrial/sensor-upload-server/internal/grpcapi"
@@ -57,19 +58,21 @@ type Options struct {
 
 // App is a fully wired server with its listeners bound.
 type App struct {
-	cfg      config.Config
-	log      *slog.Logger
-	pool     *pgxpool.Pool
-	public   *httpx.HTTPServer
-	h3       *httpx.H3Server
-	admin    *httpx.HTTPServer
-	native   *nativeGRPC // nil when GRPC_NATIVE_ADDR is empty
-	grpcSvc  *grpcapi.Service
-	grpcSrv  *grpc.Server
-	cleaner  *cleanup.Cleaner
-	bound    []io.Closer // listeners to release if New fails
-	tusStage *tusapi.Staging
-	Registry *prometheus.Registry
+	cfg     config.Config
+	log     *slog.Logger
+	pool    *pgxpool.Pool
+	public  *httpx.HTTPServer
+	h3      *httpx.H3Server
+	admin   *httpx.HTTPServer
+	native  *nativeGRPC // nil when GRPC_NATIVE_ADDR is empty
+	grpcSvc *grpcapi.Service
+	grpcSrv *grpc.Server
+	cleaner *cleanup.Cleaner
+	// retention deletes completed uploads by age and under disk pressure.
+	retention *cleanup.Retention
+	bound     []io.Closer // listeners to release if New fails
+	tusStage  *tusapi.Staging
+	Registry  *prometheus.Registry
 }
 
 // New connects to the database, applies migrations, builds the stores and
@@ -164,9 +167,23 @@ func New(ctx context.Context, opts Options) (_ *App, err error) {
 	if err := a.newGRPC(cfg, tlsCfg, rules, repo, fin, verifier, metrics); err != nil {
 		return nil, err
 	}
+	a.retention, err = cleanup.NewRetention(cleanup.RetentionConfig{
+		MaxAge:        cfg.RetentionMaxAge,
+		Interval:      cfg.CleanupInterval,
+		DiskPath:      cfg.DiskPath,
+		HighWatermark: cfg.DiskHighWatermark,
+		LowWatermark:  cfg.DiskLowWatermark,
+		DiskInterval:  cfg.DiskCheckInterval,
+	}, cleanup.RetentionDeps{Repo: repo, Store: store, Metrics: metrics, Logger: log})
+	if err != nil {
+		return nil, err
+	}
 
+	// Public and unauthenticated (see docs/decisions.md "verify endpoint").
+	files := fileapi.NewHandler(fileapi.Config{Repo: repo, Metrics: metrics, Log: log})
 	routes := httpx.RouterConfig{
-		REST: restTus,
+		REST:  restTus,
+		Files: files,
 		// The router strips "/grpc" itself, so the grpc.Server goes here
 		// without grpcapi.PrefixHandler (which would strip a second time),
 		// behind the read-ahead limit that ServeHTTP lacks.
@@ -192,6 +209,7 @@ func New(ctx context.Context, opts Options) (_ *App, err error) {
 
 	h3mux := http.NewServeMux()
 	h3mux.Handle(tusapi.BasePathRESTHTTP3, h3Tus)
+	h3mux.Handle(httpx.PrefixFiles, files)
 	host, _, err := net.SplitHostPort(cfg.ListenAddr)
 	if err != nil {
 		return nil, fmt.Errorf("LISTEN_ADDR: %w", err)
@@ -252,7 +270,7 @@ func (a *App) TusCleanup() tusapi.CleanupStaging { return a.tusStage.ForCleanup(
 // AdminAddr returns the metrics/health address.
 func (a *App) AdminAddr() net.Addr { return a.admin.Addr() }
 
-// Run serves and runs the expiry cleaner until ctx is cancelled or a
+// Run serves and runs the expiry cleaner and retention until ctx is cancelled or a
 // listener fails, then shuts down gracefully within SHUTDOWN_TIMEOUT:
 //
 //  1. the gRPC service rejects new calls with UNAVAILABLE and ends open
@@ -263,7 +281,7 @@ func (a *App) AdminAddr() net.Addr { return a.admin.Addr() }
 //  4. the HTTP/3 listener drains;
 //  5. the admin listener stops (it answers health checks until here);
 //
-// then the cleaner is stopped and the database pool closed.
+// then the cleaner and retention are stopped and the database pool closed.
 func (a *App) Run(ctx context.Context) error {
 	defer a.pool.Close()
 	nativeAddr := ""
@@ -274,14 +292,19 @@ func (a *App) Run(ctx context.Context) error {
 		"grpc_native_addr", nativeAddr, "metrics_addr", a.admin.Addr().String(), "dev_mode", a.cfg.DevMode)
 
 	cleanCtx, stopClean := context.WithCancel(context.WithoutCancel(ctx))
-	cleanDone := make(chan struct{})
+	cleanDone, retDone := make(chan struct{}), make(chan struct{})
 	go func() {
 		defer close(cleanDone)
 		a.cleaner.Run(cleanCtx)
 	}()
+	go func() {
+		defer close(retDone)
+		a.retention.Run(cleanCtx)
+	}()
 	defer func() {
 		stopClean()
 		<-cleanDone
+		<-retDone
 	}()
 
 	svcs := []httpx.Service{

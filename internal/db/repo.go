@@ -110,9 +110,61 @@ func (r *Repo) Get(ctx context.Context, protocol, ref string) (Upload, error) {
 }
 
 // FindCompletedBySHA returns the completed upload with sha256 sha.
+//
+// FOR SHARE makes the lookup wait for a DeleteCompleted of that row that
+// is in progress (and then find nothing), so the dedup check never
+// rejects a new upload as a duplicate of a file retention is deleting.
+// The lock is released when the statement ends.
 func (r *Repo) FindCompletedBySHA(ctx context.Context, sha string) (Upload, error) {
 	return r.one(ctx, "find completed upload",
-		`SELECT `+uploadColumns+` FROM uploads WHERE sha256 = $1 AND status = 'completed'`, sha)
+		`SELECT `+uploadColumns+` FROM uploads WHERE sha256 = $1 AND status = 'completed' FOR SHARE`, sha)
+}
+
+// ListCompleted returns up to limit completed rows whose completed_at is
+// older than minAge (by the database clock; 0 means every completed row),
+// oldest first. In-progress and failed rows are never listed.
+func (r *Repo) ListCompleted(ctx context.Context, minAge time.Duration, limit int) ([]Upload, error) {
+	if limit <= 0 {
+		return nil, fmt.Errorf("list completed uploads: limit must be positive, got %d", limit)
+	}
+	return r.many(ctx, "list completed uploads", `
+		SELECT `+uploadColumns+` FROM uploads
+		WHERE status = 'completed' AND completed_at < now() - $1::bigint * interval '1 microsecond'
+		ORDER BY completed_at, id LIMIT $2`, minAge.Microseconds(), limit)
+}
+
+// DeleteCompleted deletes the completed row id and, inside the same
+// transaction, calls deleteObject with its storage key; the delete is
+// committed only if deleteObject succeeds (it must treat a missing object
+// as success). A crash or failure in between leaves the row completed, so
+// a retry deletes the (possibly already missing) object again. Concurrent
+// FindCompletedBySHA calls for its sha256 wait for the transaction. It
+// returns ErrNotFound if there is no completed row id.
+func (r *Repo) DeleteCompleted(ctx context.Context, id uuid.UUID, deleteObject func(ctx context.Context, storageKey string) error) (err error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return mapErr("delete completed upload", err)
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback(context.WithoutCancel(ctx)) // the original error matters
+		}
+	}()
+	var key string
+	err = tx.QueryRow(ctx,
+		`DELETE FROM uploads WHERE id = $1 AND status = 'completed' RETURNING coalesce(storage_key, '')`, id).Scan(&key)
+	if err != nil {
+		return mapErr("delete completed upload", err)
+	}
+	if key != "" {
+		if err := deleteObject(ctx, key); err != nil {
+			return fmt.Errorf("delete object %q: %w", key, err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return mapErr("commit upload delete", err)
+	}
+	return nil
 }
 
 // FindInProgress returns the most recent 'uploading' row for

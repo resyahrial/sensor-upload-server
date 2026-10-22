@@ -175,6 +175,11 @@ func StartServer(t *testing.T, env map[string]string) *Server {
 		"JWT_HMAC_SECRET":    hmacSecret,
 		"MAX_FILE_BYTES":     strconv.Itoa(64 << 20),
 		"SHUTDOWN_TIMEOUT":   "3s",
+		// The temp dir is on the developer's disk, which may well be more
+		// than 85% full: keep disk-pressure retention from deleting the
+		// tests' completed uploads (the tests share one database).
+		"DISK_HIGH_WATERMARK": "100",
+		"DISK_LOW_WATERMARK":  "99",
 	}
 	for k, v := range env {
 		base[k] = v

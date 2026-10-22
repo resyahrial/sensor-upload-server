@@ -1,0 +1,159 @@
+#!/usr/bin/env bash
+# Generates everything a VPS deployment needs, on the operator machine:
+#
+#   ca.crt, ca.key          self-signed CA (P-256, 10 years); clients trust ca.crt
+#   server.crt, server.key  server certificate signed by the CA, SAN = the VPS IP
+#                           (+ --san extras), 397 days
+#   jwt.key, jwt.pub        ES256 key pair (devtoken signs with jwt.key; the
+#                           server only gets jwt.pub)
+#   .env                    random Postgres / MinIO credentials for docker-compose.yml
+#
+# Usage: gen-secrets.sh --ip 203.0.113.10 [--san IP:10.0.0.5,DNS:vps.example] \
+#                       [--out DIR] [--force | --renew-cert]
+#
+#   --out DIR      output directory (default: deploy/vps/secrets, git-ignored)
+#   --force        regenerate everything (new CA: clients need the new ca.crt;
+#                  new .env: the existing Postgres/MinIO data no longer matches,
+#                  so only use it together with `make vps-wipe`)
+#   --renew-cert   regenerate only the server certificate (e.g. the IP changed),
+#                  signed by the existing CA, so clients keep working
+#
+# Idempotent: existing files are kept unless --force / --renew-cert. Same
+# openssl recipe as `make devcert` (P-256 keys), plus a CA.
+# ca.key and jwt.key never leave this machine (deploy.sh does not copy them).
+set -euo pipefail
+
+here=$(cd "$(dirname "$0")" && pwd)
+out=$here/secrets
+ip=""
+san_extra=""
+force=0
+renew=0
+
+usage() { sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+
+while (($#)); do
+	case $1 in
+	--ip) ip=${2:?--ip needs a value}; shift 2 ;;
+	--san) san_extra=${2:-}; shift 2 ;;
+	--out) out=${2:?--out needs a value}; shift 2 ;;
+	--force) force=1; shift ;;
+	--renew-cert) renew=1; shift ;;
+	-h | --help) usage 0 ;;
+	*) echo "gen-secrets: unknown argument $1" >&2; usage 2 >&2 ;;
+	esac
+done
+
+if [[ -z $ip ]]; then
+	echo "gen-secrets: --ip is required (the VPS public IP, e.g. --ip 203.0.113.10)" >&2
+	exit 2
+fi
+if ! [[ $ip =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ || $ip == *:* ]]; then
+	echo "gen-secrets: --ip $ip is not an IPv4/IPv6 address" >&2
+	exit 2
+fi
+command -v openssl >/dev/null || { echo "gen-secrets: openssl not found" >&2; exit 1; }
+
+san="IP:$ip"
+if [[ -n $san_extra ]]; then
+	IFS=, read -ra extras <<<"$san_extra"
+	for e in "${extras[@]}"; do
+		e=${e// /}
+		[[ -z $e ]] && continue
+		if ! [[ $e == IP:* || $e == DNS:* ]]; then
+			echo "gen-secrets: --san entry '$e' must start with IP: or DNS:" >&2
+			exit 2
+		fi
+		san+=",$e"
+	done
+fi
+
+mkdir -p "$out"
+chmod 700 "$out"
+umask 077
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+
+# need FILE: true when FILE must be (re)generated.
+need() { [[ $force == 1 || ! -s $1 ]]; }
+rand_hex() { openssl rand -hex "$1"; }
+
+if need "$out/ca.crt" || need "$out/ca.key"; then
+	echo "gen-secrets: CA -> $out/ca.crt"
+	openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 3650 \
+		-subj "/CN=sensor-upload test CA" \
+		-addext "basicConstraints=critical,CA:TRUE,pathlen:0" \
+		-addext "keyUsage=critical,keyCertSign,cRLSign" \
+		-keyout "$tmp/ca.key" -out "$tmp/ca.crt" 2>/dev/null
+	mv "$tmp/ca.key" "$out/ca.key"
+	mv "$tmp/ca.crt" "$out/ca.crt"
+	renew=1 # a new CA always needs a new server certificate
+else
+	echo "gen-secrets: keeping CA $out/ca.crt"
+fi
+
+if [[ $renew == 1 ]] || need "$out/server.crt" || need "$out/server.key"; then
+	echo "gen-secrets: server certificate (SAN $san) -> $out/server.crt"
+	openssl req -new -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
+		-subj "/CN=$ip" -keyout "$tmp/server.key" -out "$tmp/server.csr" 2>/dev/null
+	cat >"$tmp/server.ext" <<EOF
+basicConstraints=critical,CA:FALSE
+keyUsage=critical,digitalSignature
+extendedKeyUsage=serverAuth
+subjectAltName=$san
+subjectKeyIdentifier=hash
+authorityKeyIdentifier=keyid
+EOF
+	openssl x509 -req -in "$tmp/server.csr" -CA "$out/ca.crt" -CAkey "$out/ca.key" \
+		-set_serial "0x$(rand_hex 16)" -days 397 -sha256 \
+		-extfile "$tmp/server.ext" -out "$tmp/server.crt" 2>/dev/null
+	openssl verify -CAfile "$out/ca.crt" "$tmp/server.crt" >/dev/null
+	mv "$tmp/server.key" "$out/server.key"
+	mv "$tmp/server.crt" "$out/server.crt"
+else
+	have=$(openssl x509 -in "$out/server.crt" -noout -ext subjectAltName 2>/dev/null | tail -n +2 | tr -d ' ')
+	want=${san//IP:/IPAddress:}
+	echo "gen-secrets: keeping server certificate $out/server.crt ($have)"
+	# Without --san only the IP has to be in it; with --san the whole list.
+	if [[ -n $san_extra && $have != "$want" ]] || [[ ",$have," != *",IPAddress:$ip,"* ]]; then
+		echo "gen-secrets: WARNING: its SAN is not $want; run again with --renew-cert" >&2
+	fi
+fi
+
+if need "$out/jwt.key" || need "$out/jwt.pub"; then
+	echo "gen-secrets: ES256 JWT key pair -> $out/jwt.key, $out/jwt.pub"
+	openssl ecparam -name prime256v1 -genkey -noout -out "$tmp/jwt.key"
+	openssl ec -in "$tmp/jwt.key" -pubout -out "$tmp/jwt.pub" 2>/dev/null
+	mv "$tmp/jwt.key" "$out/jwt.key"
+	mv "$tmp/jwt.pub" "$out/jwt.pub"
+else
+	echo "gen-secrets: keeping JWT key pair $out/jwt.key"
+fi
+
+if need "$out/.env"; then
+	echo "gen-secrets: random credentials -> $out/.env"
+	sed \
+		-e "s/^POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=$(rand_hex 24)/" \
+		-e "s/^MINIO_ROOT_PASSWORD=.*/MINIO_ROOT_PASSWORD=$(rand_hex 24)/" \
+		-e "s/^S3_SECRET_KEY=.*/S3_SECRET_KEY=$(rand_hex 24)/" \
+		-e "s/^MINIO_ROOT_USER=.*/MINIO_ROOT_USER=sensoradmin-$(rand_hex 4)/" \
+		-e '1,/^$/{/^#/d;/^$/d;}' \
+		"$here/.env.example" >"$tmp/env"
+	{
+		echo "# Generated by deploy/vps/gen-secrets.sh on $(date -u +%Y-%m-%dT%H:%M:%SZ) for $ip."
+		echo "# Secret: do not commit. Changing the passwords after the first deploy"
+		echo "# needs a matching change inside Postgres/MinIO (or make vps-wipe)."
+		echo
+		cat "$tmp/env"
+	} >"$out/.env"
+	if grep -q change-me "$out/.env"; then
+		echo "gen-secrets: placeholder left in $out/.env" >&2
+		exit 1
+	fi
+else
+	echo "gen-secrets: keeping $out/.env"
+fi
+
+chmod 600 "$out/ca.key" "$out/server.key" "$out/jwt.key" "$out/.env"
+chmod 644 "$out/ca.crt" "$out/server.crt" "$out/jwt.pub"
+echo "gen-secrets: done. Clients trust $out/ca.crt; keep ca.key and jwt.key private."

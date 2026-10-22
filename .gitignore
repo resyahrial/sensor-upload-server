@@ -8,3 +8,4 @@
 .env
 coverage.out
 /.claude/
+/deploy/vps/secrets/

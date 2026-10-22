@@ -68,6 +68,18 @@ type Config struct {
 	IncompleteTTL   time.Duration
 	CleanupInterval time.Duration
 
+	// RetentionMaxAge is how long completed uploads are kept; 0 keeps
+	// them forever.
+	RetentionMaxAge time.Duration
+	// DiskPath is the filesystem watched for disk pressure.
+	DiskPath string
+	// DiskHighWatermark and DiskLowWatermark are used-space percentages:
+	// at or above high, the oldest completed uploads are deleted until
+	// usage is below low.
+	DiskHighWatermark int
+	DiskLowWatermark  int
+	DiskCheckInterval time.Duration
+
 	GRPCMaxChunkBytes int
 	GRPCAckEveryN     int
 
@@ -114,6 +126,10 @@ func Load(lookup LookupFunc) (Config, error) {
 		MaxFileBytes:      p.int64("MAX_FILE_BYTES", 524288000),
 		IncompleteTTL:     p.duration("INCOMPLETE_TTL", 168*time.Hour),
 		CleanupInterval:   p.duration("CLEANUP_INTERVAL", time.Hour),
+		RetentionMaxAge:   p.duration("RETENTION_MAX_AGE", 168*time.Hour),
+		DiskHighWatermark: int(p.int64("DISK_HIGH_WATERMARK", 85)),
+		DiskLowWatermark:  int(p.int64("DISK_LOW_WATERMARK", 70)),
+		DiskCheckInterval: p.duration("DISK_CHECK_INTERVAL", time.Minute),
 		GRPCMaxChunkBytes: int(p.int64("GRPC_MAX_CHUNK_BYTES", 262144)),
 		GRPCAckEveryN:     int(p.int64("GRPC_ACK_EVERY_N", 1)),
 		QUICIdleTimeout:   p.duration("QUIC_IDLE_TIMEOUT", 60*time.Second),
@@ -126,6 +142,13 @@ func Load(lookup LookupFunc) (Config, error) {
 		LogLevel:          p.level("LOG_LEVEL", slog.LevelInfo),
 		ShutdownTimeout:   p.duration("SHUTDOWN_TIMEOUT", 30*time.Second),
 	}
+	// The disk that fills up: the object directory, or (objects in S3)
+	// the staging directory unless DISK_PATH names e.g. MinIO's data dir.
+	defDisk := c.StagingDir
+	if c.ObjStore == BackendLocal {
+		defDisk = c.ObjStoreLocalDir
+	}
+	c.DiskPath = p.str("DISK_PATH", defDisk)
 	if c.DevMode {
 		if _, set := lookup("LOG_LEVEL"); !set {
 			c.LogLevel = slog.LevelDebug
@@ -194,6 +217,7 @@ func (c Config) validate() []error {
 		{"GRPC_ACK_EVERY_N", int64(c.GRPCAckEveryN)},
 		{"INCOMPLETE_TTL", int64(c.IncompleteTTL)},
 		{"CLEANUP_INTERVAL", int64(c.CleanupInterval)},
+		{"DISK_CHECK_INTERVAL", int64(c.DiskCheckInterval)},
 		{"QUIC_IDLE_TIMEOUT", int64(c.QUICIdleTimeout)},
 		{"QUIC_KEEPALIVE", int64(c.QUICKeepAlive)},
 		{"SHUTDOWN_TIMEOUT", int64(c.ShutdownTimeout)},
@@ -202,6 +226,25 @@ func (c Config) validate() []error {
 		if v.val <= 0 {
 			fail("%s must be positive", v.name)
 		}
+	}
+	if c.RetentionMaxAge < 0 {
+		fail("RETENTION_MAX_AGE must not be negative (0 disables it)")
+	}
+	if c.DiskPath == "" {
+		fail("DISK_PATH is required")
+	}
+	wmOK := true
+	for _, w := range []struct {
+		name string
+		val  int
+	}{{"DISK_HIGH_WATERMARK", c.DiskHighWatermark}, {"DISK_LOW_WATERMARK", c.DiskLowWatermark}} {
+		if w.val < 1 || w.val > 100 {
+			fail("%s must be between 1 and 100, got %d", w.name, w.val)
+			wmOK = false
+		}
+	}
+	if wmOK && c.DiskLowWatermark >= c.DiskHighWatermark {
+		fail("DISK_LOW_WATERMARK (%d) must be lower than DISK_HIGH_WATERMARK (%d)", c.DiskLowWatermark, c.DiskHighWatermark)
 	}
 	if c.QUICKeepAlive > 0 && c.QUICIdleTimeout > 0 && c.QUICKeepAlive >= c.QUICIdleTimeout {
 		fail("QUIC_KEEPALIVE (%s) must be shorter than QUIC_IDLE_TIMEOUT (%s)", c.QUICKeepAlive, c.QUICIdleTimeout)
