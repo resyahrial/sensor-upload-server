@@ -80,11 +80,7 @@ func (h *endpoint) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	device, err := h.cfg.Verifier.VerifyHeader(r.Context(), r.Header.Get("Authorization"))
 	if err != nil {
 		st.fail(err)
-		if errors.Is(err, auth.ErrUnavailable) {
-			writeError(rw, r, errAuthUnavailable)
-		} else {
-			writeError(rw, r, errUnauthenticated)
-		}
+		writeError(rw, r, verifyError(err))
 		return
 	}
 	st.device = device
@@ -98,6 +94,14 @@ func (h *endpoint) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default: // OPTIONS; everything else gets tusd's 405
 		h.tusd.ServeHTTP(rw, r)
 	}
+}
+
+// verifyError maps a token verification failure to its 401 response.
+func verifyError(err error) handler.Error {
+	if errors.Is(err, auth.ErrTokenExpired) {
+		return errTokenExpired
+	}
+	return errUnauthenticated
 }
 
 // serveUpload handles HEAD, PATCH and DELETE on an existing upload.

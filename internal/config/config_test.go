@@ -18,9 +18,10 @@ func env(m map[string]string) LookupFunc {
 
 func baseEnv() map[string]string {
 	return map[string]string{
-		"TLS_CERT_FILE":       "cert.pem",
-		"TLS_KEY_FILE":        "key.pem",
-		"DATABASE_URL":        "postgres://localhost/db",
+		"TLS_CERT_FILE":        "cert.pem",
+		"TLS_KEY_FILE":         "key.pem",
+		"DATABASE_URL":         "postgres://localhost/db",
+		"JWT_SIGNING_KEY_FILE": "jwt.key",
 	}
 }
 
@@ -119,6 +120,10 @@ func TestLoadValidation(t *testing.T) {
 		{"missing TLS cert", without("TLS_CERT_FILE"), "TLS_CERT_FILE is required"},
 		{"missing TLS key", without("TLS_KEY_FILE"), "TLS_KEY_FILE is required"},
 		{"missing database", without("DATABASE_URL"), "DATABASE_URL is required"},
+		{"missing signing key", without("JWT_SIGNING_KEY_FILE"), "JWT_SIGNING_KEY_FILE is required"},
+		{"zero access ttl", with("ACCESS_TOKEN_TTL", "0s"), "ACCESS_TOKEN_TTL must be positive"},
+		{"idle over max age", with("REFRESH_IDLE_TTL", "400h", "REFRESH_MAX_AGE", "300h"), "must not exceed REFRESH_MAX_AGE"},
+		{"access over idle", with("ACCESS_TOKEN_TTL", "100h", "REFRESH_IDLE_TTL", "50h"), "must be shorter than REFRESH_IDLE_TTL"},
 		{"bad duration", with("INCOMPLETE_TTL", "7days"), "INCOMPLETE_TTL"},
 		{"negative duration", with("CLEANUP_INTERVAL", "-1s"), "CLEANUP_INTERVAL must be positive"},
 		{"zero shutdown", with("SHUTDOWN_TIMEOUT", "0s"), "SHUTDOWN_TIMEOUT must be positive"},

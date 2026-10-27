@@ -390,6 +390,14 @@ func wantCode(t *testing.T, what string, err error, want codes.Code) {
 	}
 }
 
+// wantStatus is wantCode that also checks the status message.
+func wantStatus(t *testing.T, what string, err error, want codes.Code, msg string) {
+	t.Helper()
+	if st := status.Convert(err); st.Code() != want || st.Message() != msg {
+		t.Errorf("%s: %v %q, want %v %q", what, st.Code(), st.Message(), want, msg)
+	}
+}
+
 // --- contract client -----------------------------------------------------
 
 // runClient uploads path with internal/client (outbox, resume, backoff) and

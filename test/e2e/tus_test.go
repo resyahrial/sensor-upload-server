@@ -394,25 +394,45 @@ func TestShortCircuitGuard(t *testing.T) {
 	}
 }
 
-// badTokens returns invalid tokens for dev (whose key is in device_keys):
-// all must get the same 401 / UNAUTHENTICATED.
-func badTokens(t *testing.T, dev string) map[string]string {
+// badToken is a rejected access token and the error code it must get:
+// the REST {"error":code} body and the gRPC UNAUTHENTICATED message.
+type badToken struct {
+	token string
+	code  string
+}
+
+// badTokens returns rejected tokens for dev.
+func badTokens(t *testing.T, dev string) map[string]badToken {
 	t.Helper()
-	_, key, err := auth.ParseToken(Token(t, dev))
+	valid := Token(t, dev)
+	otherKey, err := auth.GenerateSigningKey()
 	if err != nil {
 		t.Fatal(err)
 	}
-	// A device whose key was replaced: its first token is rejected.
-	rotated := device()
-	old := SetDeviceKey(t, rotated)
-	SetDeviceKey(t, rotated)
-	return map[string]string{
-		"missing":        "",
-		"wrong-key":      auth.FormatToken(dev, strings.Repeat("0", auth.KeyHexLen)),
-		"unknown-device": auth.FormatToken(device(), key),
-		"rotated-key":    old,
-		"no-underscore":  dev + key,
-		"jwt":            "eyJhbGciOiJIUzI1NiJ9.eyJkZXZpY2VfaWQiOiJ4In0.c2ln",
+	other, err := auth.NewIssuer(auth.IssuerConfig{Key: otherKey, Issuer: JWTIssuer, TTL: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreign, _, err := other.Issue(dev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrongIss, err := auth.NewIssuer(auth.IssuerConfig{Key: SigningKey, Issuer: "someone-else", TTL: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrongIssTok, _, err := wrongIss.Issue(dev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return map[string]badToken{
+		"missing":            {"", "invalid_token"},
+		"garbage":            {"not-a-jwt", "invalid_token"},
+		"other-signing-key":  {foreign, "invalid_token"},
+		"tampered-signature": {valid[:len(valid)-4] + "AAAA", "invalid_token"},
+		"wrong-issuer":       {wrongIssTok, "invalid_token"},
+		"hs256":              {"eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ4In0.c2ln", "invalid_token"},
+		"expired":            {ExpiredToken(t, dev), "token_expired"},
 	}
 }
 
@@ -424,22 +444,38 @@ func TestAuthFailures(t *testing.T) {
 	loc := owner.MustCreate(f)
 	bad := badTokens(t, dev)
 	for _, ep := range endpoints {
-		for name, tok := range bad {
+		for name, bt := range bad {
 			t.Run(ep.name+"/"+name, func(t *testing.T) {
 				c := Endpoint(t, s, ep.proto, ep.base, dev)
-				c.Token = tok
-				if res, _ := c.Create(f, ""); res.StatusCode != http.StatusUnauthorized {
-					t.Errorf("POST: %d", res.StatusCode)
-				}
-				target := c.Base + refOf(loc)
-				for _, m := range []string{http.MethodHead, http.MethodPatch, http.MethodDelete, http.MethodOptions} {
-					var body []byte
-					if m == http.MethodPatch {
-						body = f.Data
-					}
-					if res, _ := c.MustDo(m, target, body, patchHeaders(0)); res.StatusCode != http.StatusUnauthorized {
+				c.Token = bt.token
+				check := func(m string, res *http.Response, body string) {
+					t.Helper()
+					if res.StatusCode != http.StatusUnauthorized {
 						t.Errorf("%s: %d", m, res.StatusCode)
 					}
+					if got := res.Header.Get("WWW-Authenticate"); got != `Bearer error="invalid_token", error_description="`+bt.code+`"` {
+						t.Errorf("%s: WWW-Authenticate %q", m, got)
+					}
+					if m == http.MethodHead {
+						return
+					}
+					if ct := res.Header.Get("Content-Type"); ct != "application/json" {
+						t.Errorf("%s: Content-Type %q", m, ct)
+					}
+					if want := `{"error":"` + bt.code + `"}`; body != want {
+						t.Errorf("%s: body %q, want %q", m, body, want)
+					}
+				}
+				res, body := c.Create(f, "")
+				check(http.MethodPost, res, body)
+				target := c.Base + refOf(loc)
+				for _, m := range []string{http.MethodHead, http.MethodPatch, http.MethodDelete, http.MethodOptions} {
+					var data []byte
+					if m == http.MethodPatch {
+						data = f.Data
+					}
+					res, body := c.MustDo(m, target, data, patchHeaders(0))
+					check(m, res, body)
 				}
 			})
 		}

@@ -2,7 +2,7 @@
 # Operator-side VPS control (wrapped by mk/vps.mk). Needs ssh access to the
 # VPS (bootstrap.sh run once), Go, docker or podman, rsync and curl locally.
 #
-#   deploy.sh deploy   cross-compile cmd/server + cmd/devicekey for linux/$VPS_ARCH, build the
+#   deploy.sh deploy   cross-compile cmd/server + cmd/devicectl for linux/$VPS_ARCH, build the
 #                      runtime image (Dockerfile.prebuilt), docker save | ssh
 #                      docker load, rsync compose + certs + .env to REMOTE_DIR,
 #                      docker compose up -d, wait for /readyz
@@ -10,8 +10,10 @@
 #   deploy.sh logs     docker compose logs (SERVICE, TAIL, FOLLOW=1)
 #   deploy.sh down     docker compose down (data is kept)
 #   deploy.sh wipe     down + delete everything in pgdata/ minio/ staging/ (asks first)
-#   deploy.sh device-key  DEVICE_CMD=set|delete|list [DEVICE=id]: run /devicekey
-#                      in the server container; set prints the bearer token
+#   deploy.sh device   DEVICE_CMD=batch-import|approve|reject|revoke|issue|access-token|list
+#                      [DEVICE=id] [TTL=24h] [STATUS=active]: run /devicectl in
+#                      the server container; issue prints a token pair JSON,
+#                      access-token an access JWT (stdout)
 #
 # Environment:
 #   VPS           ssh destination, e.g. root@203.0.113.10 (required)
@@ -66,7 +68,7 @@ container_rt() {
 
 check_secrets() {
 	local f
-	for f in .env ca.crt server.crt server.key; do
+	for f in .env ca.crt server.crt server.key jwt.key; do
 		[[ -s $SECRETS_DIR/$f ]] || die "$SECRETS_DIR/$f missing: run make vps-secrets VPS_IP=$vps_host"
 	done
 	if ! openssl x509 -in "$SECRETS_DIR/server.crt" -noout -ext subjectAltName 2>/dev/null |
@@ -98,9 +100,9 @@ build_image() {
 	# shellcheck disable=SC2064
 	trap "rm -rf '$ctx'" EXIT
 
-	log "cross-compiling cmd/server and cmd/devicekey for linux/$VPS_ARCH"
+	log "cross-compiling cmd/server and cmd/devicectl for linux/$VPS_ARCH"
 	(cd "$root" && CGO_ENABLED=0 GOOS=linux GOARCH="$VPS_ARCH" \
-		"$GO" build -trimpath -ldflags="-s -w" -o "$ctx/" ./cmd/server ./cmd/devicekey)
+		"$GO" build -trimpath -ldflags="-s -w" -o "$ctx/" ./cmd/server ./cmd/devicectl)
 	mkdir -p "$ctx/data/staging" "$ctx/data/objects"
 
 	log "building $image ($rt, linux/$VPS_ARCH)"
@@ -117,10 +119,10 @@ sync_files() {
 	rsync -t --chmod=F644 -e "$rsh" "$here/docker-compose.yml" "$VPS:$REMOTE_DIR/docker-compose.yml"
 	rsync -t --chmod=F600 -e "$rsh" "$SECRETS_DIR/.env" "$VPS:$REMOTE_DIR/.env"
 	# No -p/-g: new files get group 65532 from the setgid certs/ directory,
-	# mode 640, so only the server container (and DEPLOY_USER) can read the key.
-	# ca.key stays on this machine.
+	# mode 640, so only the server container (and DEPLOY_USER) can read the
+	# TLS and JWT signing keys. ca.key stays on this machine.
 	certs_changed=$(rsync -ti --checksum --chmod=F640 -e "$rsh" \
-		"$SECRETS_DIR/server.crt" "$SECRETS_DIR/server.key" "$SECRETS_DIR/ca.crt" \
+		"$SECRETS_DIR/server.crt" "$SECRETS_DIR/server.key" "$SECRETS_DIR/jwt.key" "$SECRETS_DIR/ca.crt" \
 		"$VPS:$REMOTE_DIR/certs/")
 }
 
@@ -155,7 +157,7 @@ cmd_deploy() {
 	log "docker compose up -d"
 	remote "docker compose up -d --remove-orphans"
 	if [[ -n $certs_changed ]]; then
-		log "certificates changed; restarting server"
+		log "certificates or JWT key changed; restarting server"
 		remote "docker compose restart server"
 	fi
 	wait_ready
@@ -200,25 +202,35 @@ cmd_wipe() {
 	log "wiped. make vps-deploy starts with an empty database and bucket."
 }
 
-cmd_device_key() {
-	local cmd=${DEVICE_CMD:-set} dev=${DEVICE:-}
+cmd_device() {
+	local cmd=${DEVICE_CMD:-} dev=${DEVICE:-} ttl=${TTL:-} st=${STATUS:-} args=""
 	case $cmd in
-	set | delete)
+	batch-import | approve | reject | revoke | issue | access-token)
 		# Same rule as metadata device_id; also keeps the remote command safe.
 		[[ $dev =~ ^[a-z0-9][a-z0-9-]{2,63}$ ]] || die "DEVICE='$dev' must match ^[a-z0-9][a-z0-9-]{2,63}$"
-		remote "docker compose exec -T server /devicekey $cmd -device $dev"
+		args="-device $dev"
+		if [[ $cmd == access-token && -n $ttl ]]; then
+			[[ $ttl =~ ^[0-9]+(ns|us|ms|s|m|h)([0-9]+(ns|us|ms|s|m|h))*$ ]] || die "TTL='$ttl' is not a Go duration (e.g. 24h)"
+			args+=" -ttl $ttl"
+		fi
 		;;
-	list) remote "docker compose exec -T server /devicekey list" ;;
-	*) die "DEVICE_CMD must be set, delete or list" ;;
+	list)
+		if [[ -n $st ]]; then
+			[[ $st =~ ^(pending|active|rejected|revoked)$ ]] || die "STATUS must be pending, active, rejected or revoked"
+			args="-status $st"
+		fi
+		;;
+	*) die "DEVICE_CMD must be batch-import, approve, reject, revoke, issue, access-token or list" ;;
 	esac
+	remote "docker compose exec -T server /devicectl $cmd $args"
 }
 
 case ${1:-} in
 deploy) cmd_deploy ;;
-device-key) cmd_device_key ;;
+device) cmd_device ;;
 status) cmd_status ;;
 logs) cmd_logs ;;
 down) cmd_down ;;
 wipe) cmd_wipe ;;
-*) echo "usage: $0 deploy|status|logs|down|wipe|device-key (VPS=user@host)" >&2; exit 2 ;;
+*) echo "usage: $0 deploy|status|logs|down|wipe|device (VPS=user@host)" >&2; exit 2 ;;
 esac

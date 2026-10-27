@@ -42,12 +42,20 @@ import (
 
 const postgresImage = "docker.io/library/postgres:16-alpine"
 
+// JWTIssuer is the JWT_ISSUER of every test server.
+const JWTIssuer = "sensor-upload-e2e"
+
 // Shared across tests (set up once in TestMain).
 var (
 	testDSN string
-	keys    *db.DeviceKeys // device_keys of the shared database
 	certPEM []byte // self-signed server certificate
 	keyPEM  []byte
+	// SigningKey is the access token signing key of every test server
+	// (written to each server's JWT_SIGNING_KEY_FILE), so tokens stay valid
+	// across servers and restarts.
+	SigningKey *ecdsa.PrivateKey
+	// TokenIssuer mints access tokens accepted by every test server.
+	TokenIssuer *auth.Issuer
 )
 
 func TestMain(m *testing.M) {
@@ -85,7 +93,14 @@ func runMain(m *testing.M) int {
 		fmt.Fprintln(os.Stderr, "migrate:", err)
 		return 1
 	}
-	keys = db.NewDeviceKeys(pool)
+	if SigningKey, err = auth.GenerateSigningKey(); err != nil {
+		fmt.Fprintln(os.Stderr, "signing key:", err)
+		return 1
+	}
+	if TokenIssuer, err = auth.NewIssuer(auth.IssuerConfig{Key: SigningKey, Issuer: JWTIssuer, TTL: time.Hour}); err != nil {
+		fmt.Fprintln(os.Stderr, "token issuer:", err)
+		return 1
+	}
 	if certPEM, keyPEM, err = selfSignedCert(); err != nil {
 		fmt.Fprintln(os.Stderr, "certificate:", err)
 		return 1
@@ -139,9 +154,9 @@ func (f *FaultStore) Put(ctx context.Context, key string, r io.Reader, size int6
 }
 
 // Server is a restartable in-process upload server. Env overrides are
-// applied on top of the defaults (local object store, file staging,
-// device keys in the shared database). The port stays the same across restarts, so upload
-// URLs remain valid.
+// applied on top of the defaults (local object store, file staging, the
+// shared database and SigningKey). The port stays the same across
+// restarts, so upload URLs remain valid.
 type Server struct {
 	t     *testing.T
 	env   map[string]string
@@ -149,6 +164,13 @@ type Server struct {
 	Store *FaultStore // nil when OBJSTORE=s3
 	Repo  *db.Repo
 	pool  *pgxpool.Pool
+	// DatabaseURL is the server's DATABASE_URL (the shared database).
+	DatabaseURL string
+	// SigningKey and SigningKeyFile are the server's access token key and
+	// its JWT_SIGNING_KEY_FILE; Issuer mints tokens it accepts.
+	SigningKey     *ecdsa.PrivateKey
+	SigningKeyFile string
+	Issuer         *auth.Issuer
 
 	mu     sync.Mutex
 	App    *app.App // current instance
@@ -169,18 +191,28 @@ func StartServer(t *testing.T, env map[string]string) *Server {
 	if err := os.WriteFile(keyFile, keyPEM, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	jwtKey, err := auth.EncodePrivateKey(SigningKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jwtKeyFile := filepath.Join(dir, "jwt-signing.pem")
+	if err := os.WriteFile(jwtKeyFile, jwtKey, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	base := map[string]string{
-		"LISTEN_ADDR":        "127.0.0.1:0",
-		"GRPC_NATIVE_ADDR":   "127.0.0.1:0",
-		"METRICS_ADDR":       "127.0.0.1:0",
-		"TLS_CERT_FILE":      certFile,
-		"TLS_KEY_FILE":       keyFile,
-		"DATABASE_URL":       testDSN,
-		"STAGING_DIR":        filepath.Join(dir, "staging"),
-		"OBJSTORE_LOCAL_DIR": filepath.Join(dir, "objects"),
-		"LOG_LEVEL":          "warn",
-		"MAX_FILE_BYTES":     strconv.Itoa(64 << 20),
-		"SHUTDOWN_TIMEOUT":   "3s",
+		"LISTEN_ADDR":          "127.0.0.1:0",
+		"GRPC_NATIVE_ADDR":     "127.0.0.1:0",
+		"METRICS_ADDR":         "127.0.0.1:0",
+		"TLS_CERT_FILE":        certFile,
+		"TLS_KEY_FILE":         keyFile,
+		"DATABASE_URL":         testDSN,
+		"JWT_SIGNING_KEY_FILE": jwtKeyFile,
+		"JWT_ISSUER":           JWTIssuer,
+		"STAGING_DIR":          filepath.Join(dir, "staging"),
+		"OBJSTORE_LOCAL_DIR":   filepath.Join(dir, "objects"),
+		"LOG_LEVEL":            "warn",
+		"MAX_FILE_BYTES":       strconv.Itoa(64 << 20),
+		"SHUTDOWN_TIMEOUT":     "3s",
 		// The temp dir is on the developer's disk, which may well be more
 		// than 85% full: keep disk-pressure retention from deleting the
 		// tests' completed uploads (the tests share one database).
@@ -190,7 +222,8 @@ func StartServer(t *testing.T, env map[string]string) *Server {
 	for k, v := range env {
 		base[k] = v
 	}
-	s := &Server{t: t, env: base, Dir: dir}
+	s := &Server{t: t, env: base, Dir: dir, DatabaseURL: base["DATABASE_URL"],
+		SigningKey: SigningKey, SigningKeyFile: jwtKeyFile, Issuer: TokenIssuer}
 	if base["OBJSTORE"] != config.BackendS3 {
 		local, err := objstore.NewLocal(base["OBJSTORE_LOCAL_DIR"])
 		if err != nil {
@@ -286,46 +319,52 @@ func (s *Server) GRPCDir() string { return filepath.Join(s.env["STAGING_DIR"], "
 // TusDir is the tus filestore directory.
 func (s *Server) TusDir() string { return filepath.Join(s.env["STAGING_DIR"], "tus") }
 
-var (
-	tokensMu sync.Mutex
-	tokens   = map[string]string{} // device -> token issued by Token
-)
-
-// Token returns a valid device token: the first call for a device stores a
-// new key in device_keys (like `devicekey set`), later calls return the
-// same token so that every client of one device stays authenticated.
+// Token returns a valid access token for device (TTL 1 h) from the
+// shared TokenIssuer.
 func Token(t *testing.T, device string) string {
 	t.Helper()
-	tokensMu.Lock()
-	defer tokensMu.Unlock()
-	if tok, ok := tokens[device]; ok {
-		return tok
-	}
-	return setKeyLocked(t, device)
-}
-
-// SetDeviceKey stores a new key for device, replacing (and invalidating)
-// any previous one, and returns its token; Token returns it from now on.
-func SetDeviceKey(t *testing.T, device string) string {
-	t.Helper()
-	tokensMu.Lock()
-	defer tokensMu.Unlock()
-	return setKeyLocked(t, device)
-}
-
-func setKeyLocked(t *testing.T, device string) string {
-	t.Helper()
-	key, err := auth.GenerateKey()
+	tok, _, err := TokenIssuer.Issue(device)
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if err := keys.Set(ctx, device, auth.HashKey(key)); err != nil {
+	return tok
+}
+
+// TokenTTL returns an access token for device valid for ttl.
+func TokenTTL(t *testing.T, device string, ttl time.Duration) string {
+	t.Helper()
+	tok, _, err := TokenIssuer.IssueTTL(device, ttl)
+	if err != nil {
 		t.Fatal(err)
 	}
-	tok := auth.FormatToken(device, key)
-	tokens[device] = tok
+	return tok
+}
+
+// ExpiredToken returns a correctly signed access token for device that
+// expired an hour ago (well beyond auth.Leeway).
+func ExpiredToken(t *testing.T, device string) string {
+	t.Helper()
+	past, err := auth.NewIssuer(auth.IssuerConfig{
+		Key: SigningKey, Issuer: JWTIssuer, TTL: time.Minute,
+		Now: func() time.Time { return time.Now().Add(-time.Hour) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok, _, err := past.Issue(device)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tok
+}
+
+// Token returns an access token for device accepted by s.
+func (s *Server) Token(t *testing.T, device string) string {
+	t.Helper()
+	tok, _, err := s.Issuer.Issue(device)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return tok
 }
 

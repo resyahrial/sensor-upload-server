@@ -27,6 +27,7 @@ import (
 	"github.com/resyahrial/sensor-upload-server/internal/cleanup"
 	"github.com/resyahrial/sensor-upload-server/internal/config"
 	"github.com/resyahrial/sensor-upload-server/internal/db"
+	"github.com/resyahrial/sensor-upload-server/internal/deviceapi"
 	"github.com/resyahrial/sensor-upload-server/internal/fileapi"
 	"github.com/resyahrial/sensor-upload-server/internal/finalize"
 	"github.com/resyahrial/sensor-upload-server/internal/grpcadapt"
@@ -105,13 +106,12 @@ func New(ctx context.Context, opts Options) (_ *App, err error) {
 		return nil, err
 	}
 	log.Info("database ready")
-	// One indexed lookup in device_keys per tus request / gRPC call or
-	// stream; no cache (docs/decisions.md "Decisions (device keys)").
-	verifier, err := auth.NewVerifier(db.NewDeviceKeys(pool), auth.DefaultLookupTimeout)
+	// Stateless JWT verification: no database lookup per request
+	// (docs/decisions.md "Decisions (JWT + refresh)").
+	issuer, verifier, err := newAuth(cfg)
 	if err != nil {
 		return nil, err
 	}
-
 	store := opts.ObjectStore
 	if store == nil {
 		if store, err = newObjectStore(ctx, cfg); err != nil {
@@ -182,9 +182,23 @@ func New(ctx context.Context, opts Options) (_ *App, err error) {
 
 	// Public and unauthenticated (see docs/decisions.md "verify endpoint").
 	files := fileapi.NewHandler(fileapi.Config{Repo: repo, Metrics: metrics, Log: log})
+	// Device registration and token refresh (unauthenticated JSON).
+	devices, err := deviceapi.NewHandler(deviceapi.Config{
+		Store:      db.NewDevices(pool),
+		Issuer:     issuer,
+		IdleTTL:    cfg.RefreshIdleTTL,
+		MaxAge:     cfg.RefreshMaxAge,
+		RetryAfter: cfg.RegisterRetryAfter,
+		Metrics:    metrics,
+		Log:        log,
+	})
+	if err != nil {
+		return nil, err
+	}
 	routes := httpx.RouterConfig{
-		REST:  restTus,
-		Files: files,
+		REST:    restTus,
+		Files:   files,
+		Devices: devices,
 		// The router strips "/grpc" itself, so the grpc.Server goes here
 		// without grpcapi.PrefixHandler (which would strip a second time),
 		// behind the read-ahead limit that ServeHTTP lacks.
@@ -327,6 +341,29 @@ func (a *App) Run(ctx context.Context) error {
 	}
 	a.log.Info("server stopped")
 	return nil
+}
+
+// newAuth loads the signing key and builds the access token issuer and a
+// verifier accepting the signing key plus JWT_VERIFY_KEYS_DIR.
+func newAuth(cfg config.Config) (*auth.Issuer, *auth.Verifier, error) {
+	key, err := auth.LoadSigningKey(cfg.JWTSigningKeyFile)
+	if err != nil {
+		return nil, nil, err
+	}
+	issuer, err := auth.NewIssuer(auth.IssuerConfig{Key: key, Issuer: cfg.JWTIssuer, TTL: cfg.AccessTokenTTL})
+	if err != nil {
+		return nil, nil, err
+	}
+	keys, err := auth.LoadVerifyKeys(cfg.JWTVerifyKeysDir)
+	if err != nil {
+		return nil, nil, err
+	}
+	keys[issuer.KeyID()] = issuer.PublicKey()
+	verifier, err := auth.NewVerifier(auth.VerifierConfig{Issuer: cfg.JWTIssuer, Keys: keys})
+	if err != nil {
+		return nil, nil, err
+	}
+	return issuer, verifier, nil
 }
 
 // newGRPC builds the gRPC service (staging in STAGING_DIR/grpc), its

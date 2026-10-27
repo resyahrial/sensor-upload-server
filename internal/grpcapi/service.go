@@ -161,7 +161,7 @@ func (s *Service) Init(ctx context.Context, req *uploadv1.InitRequest) (*uploadv
 		return nil, s.logResult(log, start, status.Error(codes.InvalidArgument, err.Error()), err)
 	}
 	if err := auth.CheckDevice(device, m.DeviceID); err != nil {
-		return nil, s.logResult(log, start, status.Error(codes.PermissionDenied, "device_id does not match token"), err)
+		return nil, s.logResult(log, start, errForbidden, err)
 	}
 	done, err := s.repo.CompletedExists(ctx, m.SHA256)
 	if err != nil {

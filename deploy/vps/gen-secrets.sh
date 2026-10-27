@@ -4,6 +4,8 @@
 #   ca.crt, ca.key          self-signed CA (P-256, 10 years); clients trust ca.crt
 #   server.crt, server.key  server certificate signed by the CA, SAN = the VPS IP
 #                           (+ --san extras), 397 days
+#   jwt.key                 ES256 (P-256, PKCS #8) access-token signing key
+#                           (JWT_SIGNING_KEY_FILE)
 #   .env                    random Postgres / MinIO credentials for docker-compose.yml
 #
 # Usage: gen-secrets.sh --ip 203.0.113.10 [--san IP:10.0.0.5,DNS:vps.example] \
@@ -11,15 +13,18 @@
 #
 #   --out DIR      output directory (default: deploy/vps/secrets, git-ignored)
 #   --force        regenerate everything (new CA: clients need the new ca.crt;
-#                  new .env: the existing Postgres/MinIO data no longer matches,
-#                  so only use it together with `make vps-wipe`)
+#                  new jwt.key: every issued access token stops verifying and
+#                  devices refresh; new .env: the existing Postgres/MinIO data
+#                  no longer matches, so only use it together with `make vps-wipe`)
 #   --renew-cert   regenerate only the server certificate (e.g. the IP changed),
 #                  signed by the existing CA, so clients keep working
 #
 # Idempotent: existing files are kept unless --force / --renew-cert. Same
 # openssl recipe as `make devcert` (P-256 keys), plus a CA.
-# ca.key never leaves this machine (deploy.sh does not copy it). Device keys
-# are not generated here: they live in the VPS database (make vps-device-key).
+# ca.key never leaves this machine (deploy.sh does not copy it). jwt.key is
+# copied next to server.key (group-readable by the server container only).
+# Device credentials are not generated here: devices and refresh tokens live
+# in the VPS database (make vps-device-batch / vps-device-issue / vps-device-token).
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -29,7 +34,7 @@ san_extra=""
 force=0
 renew=0
 
-usage() { sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 while (($#)); do
 	case $1 in
@@ -119,6 +124,15 @@ else
 	fi
 fi
 
+if need "$out/jwt.key"; then
+	echo "gen-secrets: JWT signing key -> $out/jwt.key"
+	openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -pkeyopt ec_param_enc:named_curve \
+		-out "$tmp/jwt.key" 2>/dev/null
+	mv "$tmp/jwt.key" "$out/jwt.key"
+else
+	echo "gen-secrets: keeping JWT signing key $out/jwt.key"
+fi
+
 if need "$out/.env"; then
 	echo "gen-secrets: random credentials -> $out/.env"
 	sed \
@@ -143,6 +157,6 @@ else
 	echo "gen-secrets: keeping $out/.env"
 fi
 
-chmod 600 "$out/ca.key" "$out/server.key" "$out/.env"
+chmod 600 "$out/ca.key" "$out/server.key" "$out/jwt.key" "$out/.env"
 chmod 644 "$out/ca.crt" "$out/server.crt"
 echo "gen-secrets: done. Clients trust $out/ca.crt; keep ca.key private."

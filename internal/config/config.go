@@ -48,6 +48,24 @@ type Config struct {
 
 	DatabaseURL string
 
+	// JWTSigningKeyFile is the PEM P-256 private key that signs access
+	// tokens; its public key is always accepted.
+	JWTSigningKeyFile string
+	// JWTVerifyKeysDir holds extra accepted public keys (*.pem), e.g. the
+	// previous signing key during a rollover; empty = none.
+	JWTVerifyKeysDir string
+	// JWTIssuer is the iss claim of issued and accepted tokens.
+	JWTIssuer string
+	// AccessTokenTTL is the access token lifetime.
+	AccessTokenTTL time.Duration
+	// RefreshIdleTTL: a refresh token unused for this long is refused.
+	RefreshIdleTTL time.Duration
+	// RefreshMaxAge: refresh is refused this long after the device's
+	// first token (registration); the device must register again.
+	RefreshMaxAge time.Duration
+	// RegisterRetryAfter is the Retry-After of a pending registration.
+	RegisterRetryAfter time.Duration
+
 	StagingDir       string
 	TusStaging       string
 	ObjStore         string
@@ -90,16 +108,23 @@ type LookupFunc func(key string) (string, bool)
 func Load(lookup LookupFunc) (Config, error) {
 	p := parser{lookup: lookup}
 	c := Config{
-		ListenAddr:       p.str("LISTEN_ADDR", ":8443"),
-		GRPCNativeAddr:   p.str("GRPC_NATIVE_ADDR", ""),
-		MetricsAddr:      p.str("METRICS_ADDR", ":9100"),
-		TLSCertFile:      p.str("TLS_CERT_FILE", ""),
-		TLSKeyFile:       p.str("TLS_KEY_FILE", ""),
-		DatabaseURL:      p.str("DATABASE_URL", ""),
-		StagingDir:       p.str("STAGING_DIR", "./data/staging"),
-		TusStaging:       p.str("TUS_STAGING", BackendFile),
-		ObjStore:         p.str("OBJSTORE", BackendLocal),
-		ObjStoreLocalDir: p.str("OBJSTORE_LOCAL_DIR", "./data/objects"),
+		ListenAddr:         p.str("LISTEN_ADDR", ":8443"),
+		GRPCNativeAddr:     p.str("GRPC_NATIVE_ADDR", ""),
+		MetricsAddr:        p.str("METRICS_ADDR", ":9100"),
+		TLSCertFile:        p.str("TLS_CERT_FILE", ""),
+		TLSKeyFile:         p.str("TLS_KEY_FILE", ""),
+		DatabaseURL:        p.str("DATABASE_URL", ""),
+		JWTSigningKeyFile:  p.str("JWT_SIGNING_KEY_FILE", ""),
+		JWTVerifyKeysDir:   p.str("JWT_VERIFY_KEYS_DIR", ""),
+		JWTIssuer:          p.str("JWT_ISSUER", "sensor-upload-server"),
+		AccessTokenTTL:     p.duration("ACCESS_TOKEN_TTL", time.Hour),
+		RefreshIdleTTL:     p.duration("REFRESH_IDLE_TTL", 90*24*time.Hour),
+		RefreshMaxAge:      p.duration("REFRESH_MAX_AGE", 365*24*time.Hour),
+		RegisterRetryAfter: p.duration("REGISTER_RETRY_AFTER", time.Hour),
+		StagingDir:         p.str("STAGING_DIR", "./data/staging"),
+		TusStaging:         p.str("TUS_STAGING", BackendFile),
+		ObjStore:           p.str("OBJSTORE", BackendLocal),
+		ObjStoreLocalDir:   p.str("OBJSTORE_LOCAL_DIR", "./data/objects"),
 		S3: S3{
 			Endpoint:       p.str("S3_ENDPOINT", ""),
 			Region:         p.str("S3_REGION", ""),
@@ -145,6 +170,8 @@ func (c Config) validate() []error {
 		{"TLS_CERT_FILE", c.TLSCertFile},
 		{"TLS_KEY_FILE", c.TLSKeyFile},
 		{"DATABASE_URL", c.DatabaseURL},
+		{"JWT_SIGNING_KEY_FILE", c.JWTSigningKeyFile},
+		{"JWT_ISSUER", c.JWTIssuer},
 		{"STAGING_DIR", c.StagingDir},
 	}
 	for _, r := range required {
@@ -197,6 +224,10 @@ func (c Config) validate() []error {
 		{"QUIC_IDLE_TIMEOUT", int64(c.QUICIdleTimeout)},
 		{"QUIC_KEEPALIVE", int64(c.QUICKeepAlive)},
 		{"SHUTDOWN_TIMEOUT", int64(c.ShutdownTimeout)},
+		{"ACCESS_TOKEN_TTL", int64(c.AccessTokenTTL)},
+		{"REFRESH_IDLE_TTL", int64(c.RefreshIdleTTL)},
+		{"REFRESH_MAX_AGE", int64(c.RefreshMaxAge)},
+		{"REGISTER_RETRY_AFTER", int64(c.RegisterRetryAfter)},
 	}
 	for _, v := range positive {
 		if v.val <= 0 {
@@ -221,6 +252,12 @@ func (c Config) validate() []error {
 	}
 	if wmOK && c.DiskLowWatermark >= c.DiskHighWatermark {
 		fail("DISK_LOW_WATERMARK (%d) must be lower than DISK_HIGH_WATERMARK (%d)", c.DiskLowWatermark, c.DiskHighWatermark)
+	}
+	if c.RefreshIdleTTL > 0 && c.RefreshMaxAge > 0 && c.RefreshIdleTTL > c.RefreshMaxAge {
+		fail("REFRESH_IDLE_TTL (%s) must not exceed REFRESH_MAX_AGE (%s)", c.RefreshIdleTTL, c.RefreshMaxAge)
+	}
+	if c.AccessTokenTTL > 0 && c.RefreshIdleTTL > 0 && c.AccessTokenTTL >= c.RefreshIdleTTL {
+		fail("ACCESS_TOKEN_TTL (%s) must be shorter than REFRESH_IDLE_TTL (%s)", c.AccessTokenTTL, c.RefreshIdleTTL)
 	}
 	if c.QUICKeepAlive > 0 && c.QUICIdleTimeout > 0 && c.QUICKeepAlive >= c.QUICIdleTimeout {
 		fail("QUIC_KEEPALIVE (%s) must be shorter than QUIC_IDLE_TIMEOUT (%s)", c.QUICKeepAlive, c.QUICIdleTimeout)

@@ -57,6 +57,9 @@ type fakeGRPC struct {
 	// maxUnacked is the largest number of bytes received on a stream past
 	// the last ack sent on it (or past the stream's first offset).
 	maxUnacked int64
+	// authorize checks the bearer token of a call ("init", "status",
+	// "upload"); nil accepts "Bearer tok". It runs outside f.mu.
+	authorize func(method, header string) error
 }
 
 type fakeGUpload struct {
@@ -70,16 +73,23 @@ func newFakeGRPC() *fakeGRPC {
 	return &fakeGRPC{maxChunk: 1 << 20, uploads: map[string]*fakeGUpload{}, bySHA: map[string]string{}, completed: map[string]bool{}}
 }
 
-func checkAuth(ctx context.Context) error {
+func (f *fakeGRPC) checkAuth(ctx context.Context, method string) error {
 	md, _ := metadata.FromIncomingContext(ctx)
-	if v := md.Get("authorization"); len(v) != 1 || v[0] != "Bearer tok" {
-		return status.Error(codes.Unauthenticated, "bad token")
+	v := md.Get("authorization")
+	if len(v) != 1 {
+		return status.Error(codes.Unauthenticated, "invalid_token")
+	}
+	if f.authorize != nil {
+		return f.authorize(method, v[0])
+	}
+	if v[0] != "Bearer tok" {
+		return status.Error(codes.Unauthenticated, "invalid_token")
 	}
 	return nil
 }
 
 func (f *fakeGRPC) Init(ctx context.Context, req *uploadv1.InitRequest) (*uploadv1.InitResponse, error) {
-	if err := checkAuth(ctx); err != nil {
+	if err := f.checkAuth(ctx, "init"); err != nil {
 		return nil, err
 	}
 	f.mu.Lock()
@@ -108,7 +118,7 @@ func (f *fakeGRPC) Init(ctx context.Context, req *uploadv1.InitRequest) (*upload
 }
 
 func (f *fakeGRPC) Status(ctx context.Context, req *uploadv1.StatusRequest) (*uploadv1.StatusResponse, error) {
-	if err := checkAuth(ctx); err != nil {
+	if err := f.checkAuth(ctx, "status"); err != nil {
 		return nil, err
 	}
 	f.mu.Lock()
@@ -121,7 +131,7 @@ func (f *fakeGRPC) Status(ctx context.Context, req *uploadv1.StatusRequest) (*up
 }
 
 func (f *fakeGRPC) Upload(stream grpc.BidiStreamingServer[uploadv1.Chunk, uploadv1.Ack]) error {
-	if err := checkAuth(stream.Context()); err != nil {
+	if err := f.checkAuth(stream.Context(), "upload"); err != nil {
 		return err
 	}
 	// A reader goroutine receives chunks as soon as the client sends them,

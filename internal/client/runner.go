@@ -58,7 +58,7 @@ const h3FallbackAfter = 3
 type Config struct {
 	Protocol    string        // rest | rest-http3 | grpc | grpc-native
 	URL         string        // https://host:port (tus) or host:port / https://host:port (gRPC)
-	Token       string        // device token {device_id}_{key}
+	Token       string        // static access token (JWT); ignored when Tokens is set
 	Device      string        // device_id
 	Priority    int           // 1–4
 	Chunk       int           // bytes per chunk
@@ -67,6 +67,10 @@ type Config struct {
 	Concurrency int           // parallel files
 	H3Fallback  bool          // allow rest-http3 → rest fallback
 	TLS         *tls.Config   // client TLS (CA pool / insecure)
+
+	// Tokens supplies access tokens (e.g. a RefreshingSource); nil means
+	// StaticToken(Token).
+	Tokens TokenSource
 
 	// GRPCWindow is the number of chunks the gRPC client may have sent but
 	// not yet acked (default 1). It must be >= the server's GRPC_ACK_EVERY_N,
@@ -119,6 +123,12 @@ func New(cfg Config, ob *Outbox) (*Runner, error) {
 	if cfg.URL == "" || cfg.Device == "" {
 		return nil, errors.New("url and device are required")
 	}
+	if cfg.Tokens == nil {
+		if cfg.Token == "" {
+			return nil, errors.New("an access token or token source is required")
+		}
+		cfg.Tokens = StaticToken(cfg.Token)
+	}
 	if cfg.Chunk <= 0 {
 		return nil, errors.New("chunk must be positive")
 	}
@@ -170,7 +180,7 @@ func (r *Runner) newTransport(proto string) (transport, error) {
 	switch proto {
 	case ProtoREST, ProtoRESTHTTP3:
 		base := strings.TrimRight(r.cfg.URL, "/") + "/" + proto + "/files/"
-		t := &tusClient{base: base, token: r.cfg.Token, device: r.cfg.Device, reqTimeout: r.reqTimeout(), hc: r.cfg.HTTPClient}
+		t := &tusClient{base: base, tokens: r.cfg.Tokens, device: r.cfg.Device, reqTimeout: r.reqTimeout(), hc: r.cfg.HTTPClient}
 		if t.hc == nil {
 			t.hc, t.closeFn = r.httpClient(proto)
 		}
@@ -196,7 +206,7 @@ func (r *Runner) newTransport(proto string) (transport, error) {
 		if ackTimeout <= 0 {
 			ackTimeout = r.reqTimeout()
 		}
-		return &grpcClient{conn: conn, c: uploadv1.NewUploadServiceClient(conn), token: r.cfg.Token,
+		return &grpcClient{conn: conn, c: uploadv1.NewUploadServiceClient(conn), tokens: r.cfg.Tokens,
 			device: r.cfg.Device, reqTimeout: r.reqTimeout(), window: r.cfg.GRPCWindow, ackTimeout: ackTimeout}, nil
 	}
 }

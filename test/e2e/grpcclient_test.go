@@ -184,6 +184,14 @@ func WantCode(t *testing.T, what string, err error, want codes.Code) {
 	}
 }
 
+// WantStatus is WantCode that also checks the status message.
+func WantStatus(t *testing.T, what string, err error, want codes.Code, msg string) {
+	t.Helper()
+	if st := status.Convert(err); st.Code() != want || st.Message() != msg {
+		t.Errorf("%s: %s %q, want %s %q", what, st.Code(), st.Message(), want, msg)
+	}
+}
+
 // AssertGRPCStored checks that the gRPC upload id of f is completed in the
 // DB and in the object store, with its staging files gone.
 func AssertGRPCStored(t *testing.T, s *Server, id string, f File) {

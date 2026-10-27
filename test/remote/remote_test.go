@@ -192,37 +192,46 @@ func TestRemoteDuplicate(t *testing.T) {
 	}
 }
 
-// TestRemoteBadToken: a missing, malformed or wrong device token is 401 /
-// UNAUTHENTICATED, whether the device exists or not.
+// TestRemoteBadToken: a missing, malformed or wrongly signed access token
+// is 401 {"error":"invalid_token"} / UNAUTHENTICATED "invalid_token". (An
+// expired token cannot be minted here without the server's key; the
+// in-process e2e suite covers token_expired.)
 func TestRemoteBadToken(t *testing.T) {
 	e := remoteEnv(t)
 	f := newFile(t, 1024)
 	m := meta{Device: e.Device, SHA256: f.SHA256}
-	_, key, err := auth.ParseToken(e.Token(t))
+	valid := e.Token(t)
+	// A well-formed token for the same device signed by a key the server
+	// does not know.
+	foreignKey, err := auth.GenerateSigningKey()
 	if err != nil {
 		t.Fatal(err)
 	}
-	wrong := strings.Repeat("0", auth.KeyHexLen)
-	if wrong == key {
-		wrong = strings.Repeat("1", auth.KeyHexLen)
+	foreignIss, err := auth.NewIssuer(auth.IssuerConfig{Key: foreignKey, Issuer: "remote-e2e", TTL: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreign, _, err := foreignIss.Issue(e.Device)
+	if err != nil {
+		t.Fatal(err)
 	}
 	for name, tok := range map[string]string{
-		"missing":        "",
-		"garbage":        "not-a-token",
-		"wrong key":      auth.FormatToken(e.Device, wrong),
-		"unknown device": auth.FormatToken("remote-unknown-"+key[:12], key),
+		"missing":            "",
+		"garbage":            "not-a-token",
+		"other signing key":  foreign,
+		"tampered signature": valid[:len(valid)-4] + "AAAA",
 	} {
 		for _, h3 := range []bool{false, true} {
 			res, body := e.tus(t, h3, tok).create(len(f.Data), m)
-			if res.StatusCode != http.StatusUnauthorized {
-				t.Errorf("tus %s (h3=%v): %d %q, want 401", name, h3, res.StatusCode, body)
+			if res.StatusCode != http.StatusUnauthorized || body != `{"error":"invalid_token"}` {
+				t.Errorf("tus %s (h3=%v): %d %q, want 401 invalid_token", name, h3, res.StatusCode, body)
 			}
 		}
 		_, err := e.grpc(t, false, tok).init(initReq(f, e.Device))
-		wantCode(t, "grpc "+name, err, codes.Unauthenticated)
+		wantStatus(t, "grpc "+name, err, codes.Unauthenticated, "invalid_token")
 		if e.GRPCNative != "" {
 			_, err := e.grpc(t, true, tok).init(initReq(f, e.Device))
-			wantCode(t, "grpc-native "+name, err, codes.Unauthenticated)
+			wantStatus(t, "grpc-native "+name, err, codes.Unauthenticated, "invalid_token")
 		}
 	}
 	if code, _ := e.lookup(t, f.SHA256); code != http.StatusNotFound {
@@ -237,11 +246,11 @@ func TestRemoteCrossDevice(t *testing.T) {
 	f := newFile(t, fileSize)
 	t.Run("metadata device mismatch", func(t *testing.T) {
 		res, body := e.tus(t, false, e.Token(t)).create(len(f.Data), meta{Device: e.Device + "-x", SHA256: f.SHA256})
-		if res.StatusCode != http.StatusForbidden {
-			t.Errorf("tus: %d %q, want 403", res.StatusCode, body)
+		if res.StatusCode != http.StatusForbidden || body != `{"error":"device_not_active"}` {
+			t.Errorf("tus: %d %q, want 403 device_not_active", res.StatusCode, body)
 		}
 		_, err := e.grpc(t, false, e.Token(t)).init(initReq(f, e.Device+"-x"))
-		wantCode(t, "grpc", err, codes.PermissionDenied)
+		wantStatus(t, "grpc", err, codes.PermissionDenied, "device_not_active")
 	})
 	t.Run("other device's upload", func(t *testing.T) {
 		other := e.OtherToken(t)

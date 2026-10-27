@@ -19,8 +19,11 @@
 #   SIZES [50KB 2MB 20MB]  CHUNKS [64KB 256KB]  REPS [5]   (KB/MB = KiB/MiB)
 #   EXPERIMENT_PARALLEL [4]  RUN_TIMEOUT seconds [7200]  RESULTS_DIR [<repo>/results]
 #   SERVER_URL [https://server:8443]  GRPC_NATIVE_URL [server:9090]
-#   TOKEN (device token {device_id}_{key} from `make device-key`) [$UPLOADER_TOKEN]
-#   DEVICE [the token's device_id, else netem-0001]  CA_FILE (host path; empty = -insecure)
+#   TOKEN (static access JWT: `make -s device-token DEVICE=netem-0001 TTL=72h`, or
+#         `make -s vps-device-token ...`) [$UPLOADER_TOKEN]. Parallel runs share
+#         one device, so the experiment uses a static access token (long TTL),
+#         not a refresh token: an expired token fails the remaining runs.
+#   DEVICE [the token's sub claim; netem-0001 without a token]  CA_FILE (host path; empty = -insecure)
 #   UPLOADER_ARGS [-retries 100000 -backoff-max 30s]  (gRPC runs use the uploader's
 #                 default -grpc-window 1; add "-grpc-window N" here only with the
 #                 server's GRPC_ACK_EVERY_N <= N)
@@ -44,9 +47,26 @@ export RESULTS_DIR=${RESULTS_DIR:-$root/results}
 export SERVER_URL=${SERVER_URL:-https://server:8443}
 export GRPC_NATIVE_URL=${GRPC_NATIVE_URL:-server:9090}
 export UPLOADER_TOKEN=${TOKEN:-${UPLOADER_TOKEN:-}}
-# The token is {device_id}_{key} (keys never contain "_").
-if [[ -z ${DEVICE:-} && $UPLOADER_TOKEN == *_* ]]; then
-	DEVICE=${UPLOADER_TOKEN%_*}
+
+# jwt_sub TOKEN: print the sub claim of a JWT (payload not verified), or
+# nothing if it cannot be decoded.
+jwt_sub() {
+	local p dec=(base64 -d)
+	IFS=. read -r _ p _ <<<"$1"
+	[[ -n $p ]] || return 0
+	p=$(printf '%s' "$p" | tr '_-' '/+') # base64url -> base64
+	while ((${#p} % 4)); do p+='='; done
+	printf 'eA==' | base64 -d >/dev/null 2>&1 || dec=(base64 -D) # old macOS
+	printf '%s' "$p" | "${dec[@]}" 2>/dev/null |
+		sed -n 's/.*"sub"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p'
+}
+
+if [[ -z ${DEVICE:-} && -n $UPLOADER_TOKEN ]]; then
+	DEVICE=$(jwt_sub "$UPLOADER_TOKEN" || true)
+	if [[ -z $DEVICE ]]; then
+		echo "experiment: cannot read the device_id (sub) from TOKEN; is it an access JWT? Set DEVICE=..." >&2
+		exit 2
+	fi
 fi
 export DEVICE=${DEVICE:-netem-0001}
 export CA_FILE=${CA_FILE:-}

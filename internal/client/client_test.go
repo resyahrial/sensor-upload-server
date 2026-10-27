@@ -758,6 +758,7 @@ func TestNewValidates(t *testing.T) {
 		func(c *Config) { c.Device = "" },
 		func(c *Config) { c.Chunk = 0 },
 		func(c *Config) { c.Priority = 5 },
+		func(c *Config) { c.Token = "" },
 	}
 	for i, mut := range bad {
 		c := ok

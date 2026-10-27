@@ -25,7 +25,7 @@ HOST_GRPC_PORT    ?= 19090
 HOST_METRICS_PORT ?= 19100
 export HOST_BIND HOST_HTTPS_PORT HOST_GRPC_PORT HOST_METRICS_PORT
 
-.PHONY: build test test-integration up down devcert lint device-key
+.PHONY: build test test-integration up down devcert lint device-issue device-token device-approve device-list device-batch device-require
 
 build:
 	CGO_ENABLED=0 $(GO) build -trimpath -o $(BIN_DIR)/ ./cmd/...
@@ -45,7 +45,7 @@ lint:
 	$(GO) vet -tags remote ./test/remote/
 	$(STATICCHECK) -tags remote ./test/remote/
 
-devcert: $(CERT_DIR)/server.crt
+devcert: $(CERT_DIR)/server.crt $(CERT_DIR)/jwt.key
 
 # Self-signed TLS certificate for local development (dev only; key is world-readable
 # so the distroless nonroot container user can read the bind mount).
@@ -57,21 +57,49 @@ $(CERT_DIR)/server.crt:
 		-keyout $(CERT_DIR)/server.key -out $@
 	chmod 644 $(CERT_DIR)/server.key
 
+# ES256 (P-256, PKCS #8) access-token signing key for the dev stack
+# (JWT_SIGNING_KEY_FILE). Dev only: world-readable like server.key.
+$(CERT_DIR)/jwt.key:
+	mkdir -p $(CERT_DIR)
+	openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -pkeyopt ec_param_enc:named_curve -out $@
+	chmod 644 $@
+
 up: devcert
 	$(COMPOSE) -f $(COMPOSE_FILE) up -d --build
 
 down:
 	$(COMPOSE) -f $(COMPOSE_FILE) down
 
-# device-key: create or replace DEVICE's key in the running dev stack
-# (`make up`) and print its bearer token on stdout (shown only once; the
-# previous key stops working immediately). Delete / list:
-#   $(COMPOSE) -f $(COMPOSE_FILE) exec server /devicekey delete -device ID
-#   $(COMPOSE) -f $(COMPOSE_FILE) exec server /devicekey list
+# Device admin in the running dev stack (`make up`) through /devicectl:
+#   make device-batch DEVICE=netem-0001     # pre-register (batch import) DEVICE
+#   make device-approve DEVICE=netem-0001   # approve a pending device
+#   make device-list [STATUS=active]
+#   make -s device-issue DEVICE=netem-0001 > tokens.json   # token pair (uploader -refresh-token-file)
+#   TOKEN=$$(make -s device-token DEVICE=netem-0001 [TTL=24h])   # access JWT only (uploader -token)
+# Revoke / reject: $(COMPOSE) -f $(COMPOSE_FILE) exec -T server /devicectl revoke -device ID
 DEVICE ?=
-device-key:
-	@test -n '$(DEVICE)' || { echo "set DEVICE=... (e.g. make device-key DEVICE=netem-0001)" >&2; exit 2; }
-	@$(COMPOSE) -f $(COMPOSE_FILE) exec -T server /devicekey set -device '$(DEVICE)'
+TTL    ?=
+STATUS ?=
+DEVICECTL = $(COMPOSE) -f $(COMPOSE_FILE) exec -T server /devicectl
+device-require:
+	@test -n '$(DEVICE)' || { echo "set DEVICE=... (e.g. make device-token DEVICE=netem-0001)" >&2; exit 2; }
+
+## device-issue: allow-list and activate DEVICE, print a fresh token pair JSON.
+device-issue: device-require
+	@$(DEVICECTL) issue -device '$(DEVICE)'
+
+## device-token: allow-list and activate DEVICE, print only an access JWT (TTL default: ACCESS_TOKEN_TTL).
+device-token: device-require
+	@$(DEVICECTL) access-token -device '$(DEVICE)' $(if $(TTL),-ttl '$(TTL)')
+
+device-approve: device-require
+	@$(DEVICECTL) approve -device '$(DEVICE)'
+
+device-batch: device-require
+	@$(DEVICECTL) batch-import -device '$(DEVICE)'
+
+device-list:
+	@$(DEVICECTL) list $(if $(STATUS),-status '$(STATUS)')
 
 # Extra targets (proto, experiment, netem, ...) live in mk/*.mk.
 -include mk/*.mk

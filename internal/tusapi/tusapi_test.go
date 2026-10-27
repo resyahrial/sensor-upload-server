@@ -23,7 +23,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
-	"github.com/resyahrial/sensor-upload-server/internal/auth"
+	"github.com/resyahrial/sensor-upload-server/internal/auth/authtest"
 	"github.com/resyahrial/sensor-upload-server/internal/db"
 	"github.com/resyahrial/sensor-upload-server/internal/finalize"
 	"github.com/resyahrial/sensor-upload-server/internal/meta"
@@ -173,21 +173,6 @@ func (f *fakeFinalizer) callCount() int {
 	return f.calls
 }
 
-// fakeVerifier accepts "Bearer dev:<device>".
-type fakeVerifier struct{}
-
-func (fakeVerifier) VerifyHeader(_ context.Context, h string) (string, error) {
-	tok, err := auth.BearerToken(h)
-	if err != nil {
-		return "", err
-	}
-	dev, ok := strings.CutPrefix(tok, "dev:")
-	if !ok {
-		return "", auth.ErrUnauthenticated
-	}
-	return dev, nil
-}
-
 type fixture struct {
 	t       *testing.T
 	srv     *httptest.Server
@@ -198,20 +183,32 @@ type fixture struct {
 	logs    *bytes.Buffer
 	st      *Staging
 	mux     http.Handler
+	keys    *authtest.Keys
+
+	mu     sync.Mutex
+	tokens map[string]string // device -> access token, minted once
+}
+
+// token returns the fixture's access token for device.
+func (f *fixture) token(device string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	tok, ok := f.tokens[device]
+	if !ok {
+		tok = f.keys.Token(f.t, device)
+		f.tokens[device] = tok
+	}
+	return tok
 }
 
 const testTTL = 7 * 24 * time.Hour
 
-// newFixture serves both tus endpoints on one file staging; opts may
-// adjust the staging before the handlers are built.
+// newFixture serves both tus endpoints on one file staging behind a real
+// auth.Verifier (authtest keys); opts may adjust the staging before the
+// handlers are built.
 func newFixture(t *testing.T, opts ...func(*Staging)) *fixture {
 	t.Helper()
-	return newFixtureWith(t, fakeVerifier{}, opts...)
-}
-
-// newFixtureWith is newFixture with verifier v instead of fakeVerifier.
-func newFixtureWith(t *testing.T, v Verifier, opts ...func(*Staging)) *fixture {
-	t.Helper()
+	keys := authtest.New(t)
 	dir := t.TempDir()
 	st, err := NewFileStaging(dir)
 	if err != nil {
@@ -234,7 +231,7 @@ func newFixtureWith(t *testing.T, v Verifier, opts ...func(*Staging)) *fixture {
 			BasePath: ep.base, Protocol: ep.proto,
 			Rules:         meta.Rules{MaxFileBytes: 1 << 20, ContentTypes: []string{"audio/flac"}},
 			IncompleteTTL: testTTL, Staging: st, Repo: repo, Finalizer: fin,
-			Verifier: v, Metrics: m, Log: log,
+			Verifier: keys.Verifier, Metrics: m, Log: log,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -243,7 +240,8 @@ func newFixtureWith(t *testing.T, v Verifier, opts ...func(*Staging)) *fixture {
 	}
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
-	return &fixture{t: t, srv: srv, repo: repo, fin: fin, metrics: m, dir: dir, logs: logs, st: st, mux: mux}
+	return &fixture{t: t, srv: srv, repo: repo, fin: fin, metrics: m, dir: dir, logs: logs, st: st, mux: mux,
+		keys: keys, tokens: map[string]string{}}
 }
 
 type lockedWriter struct {
@@ -286,7 +284,7 @@ func (f *fixture) do(method, path, device string, body []byte, hdr map[string]st
 	}
 	req.Header.Set("Tus-Resumable", "1.0.0")
 	if device != "" {
-		req.Header.Set("Authorization", "Bearer dev:"+device)
+		req.Header.Set("Authorization", "Bearer "+f.token(device))
 	}
 	for k, v := range hdr {
 		req.Header.Set(k, v)
@@ -418,7 +416,7 @@ func TestCreateAndUpload(t *testing.T) {
 	if !strings.Contains(f.logs.String(), `"offset_before":0,"offset_after":5`) {
 		t.Errorf("request log missing offsets:\n%s", f.logs.String())
 	}
-	if strings.Contains(f.logs.String(), "dev:dev-0001") {
+	if strings.Contains(f.logs.String(), f.token("dev-0001")) {
 		t.Error("token logged")
 	}
 }
@@ -434,11 +432,11 @@ func TestCreateValidation(t *testing.T) {
 		status   int
 		body     string
 	}{
-		{"no token", "", metadata("dev-0001", shaHex(data)), "1", http.StatusUnauthorized, "unauthenticated"},
+		{"no token", "", metadata("dev-0001", shaHex(data)), "1", http.StatusUnauthorized, `{"error":"invalid_token"}`},
 		{"bad sha", "dev-0001", metadata("dev-0001", "abc"), "1", http.StatusBadRequest, "sha256"},
 		{"malformed header", "dev-0001", "device_id !!!", "1", http.StatusBadRequest, "Upload-Metadata"},
 		{"missing field", "dev-0001", "device_id " + base64.StdEncoding.EncodeToString([]byte("dev-0001")), "1", http.StatusBadRequest, "sha256"},
-		{"device mismatch", "dev-0002", metadata("dev-0001", shaHex(data)), "1", http.StatusForbidden, ""},
+		{"device mismatch", "dev-0002", metadata("dev-0001", shaHex(data)), "1", http.StatusForbidden, `{"error":"device_not_active"}`},
 		{"size zero", "dev-0001", metadata("dev-0001", shaHex(data)), "0", http.StatusBadRequest, "size"},
 		{"too large", "dev-0001", metadata("dev-0001", shaHex(data)), strconv.Itoa(1<<20 + 1), http.StatusRequestEntityTooLarge, ""},
 	}

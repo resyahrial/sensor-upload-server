@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"google.golang.org/grpc"
@@ -20,7 +21,7 @@ import (
 type grpcClient struct {
 	conn       *grpc.ClientConn
 	c          uploadv1.UploadServiceClient
-	token      string
+	tokens     TokenSource
 	device     string
 	reqTimeout time.Duration
 	window     int           // max chunks sent but not acked (≥ 1)
@@ -29,8 +30,8 @@ type grpcClient struct {
 
 func (g *grpcClient) close() error { return g.conn.Close() }
 
-func (g *grpcClient) auth(ctx context.Context) context.Context {
-	return metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+g.token)
+func withBearer(ctx context.Context, token string) context.Context {
+	return metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+token)
 }
 
 // grpcErr maps a gRPC status to an outcome error (contract §4 error table).
@@ -44,7 +45,17 @@ func grpcErr(op string, err error) error {
 		return fmt.Errorf("%s: %w: %w", op, ErrOffsetMismatch, err)
 	case codes.DataLoss:
 		return fmt.Errorf("%s: %w: %w", op, ErrChecksum, err)
-	case codes.InvalidArgument, codes.Unauthenticated, codes.PermissionDenied:
+	case codes.Unauthenticated:
+		if strings.Contains(status.Convert(err).Message(), codeTokenExpired) {
+			return fmt.Errorf("%s: %w: %w", op, ErrTokenExpired, err)
+		}
+		return fmt.Errorf("%s: %w: %w: %w", op, ErrPermanent, ErrInvalidToken, err)
+	case codes.PermissionDenied:
+		if strings.Contains(status.Convert(err).Message(), codeDeviceNotActive) {
+			return fmt.Errorf("%s: %w: %w: %w", op, ErrPermanent, ErrDeviceNotActive, err)
+		}
+		return fmt.Errorf("%s: %w: %w", op, ErrPermanent, err)
+	case codes.InvalidArgument:
 		return fmt.Errorf("%s: %w: %w", op, ErrPermanent, err)
 	default:
 		// UNAVAILABLE, DEADLINE_EXCEEDED, ABORTED, INTERNAL, …: transient.
@@ -55,28 +66,43 @@ func grpcErr(op string, err error) error {
 // begin calls Init, which is idempotent per sha256 and returns the server's
 // committed offset (contract §5.4: "Init resumes").
 func (g *grpcClient) begin(ctx context.Context, r Row) (session, error) {
-	ctx, cancel := context.WithTimeout(g.auth(ctx), g.reqTimeout)
+	ctx, cancel := context.WithTimeout(ctx, g.reqTimeout)
 	defer cancel()
-	res, err := g.c.Init(ctx, &uploadv1.InitRequest{
-		DeviceId:    g.device,
-		Sha256:      r.SHA256,
-		Size:        r.Size,
-		Filename:    r.Filename,
-		ContentType: r.ContentType,
-		CapturedAt:  r.CapturedAt,
-		Priority:    int32(r.Priority),
+	var res *uploadv1.InitResponse
+	err := withToken(ctx, g.tokens, func(token string) error {
+		var err error
+		res, err = g.c.Init(withBearer(ctx, token), &uploadv1.InitRequest{
+			DeviceId:    g.device,
+			Sha256:      r.SHA256,
+			Size:        r.Size,
+			Filename:    r.Filename,
+			ContentType: r.ContentType,
+			CapturedAt:  r.CapturedAt,
+			Priority:    int32(r.Priority),
+		})
+		if err != nil {
+			return grpcErr("init", err)
+		}
+		return nil
 	})
 	if err != nil {
-		return session{}, grpcErr("init", err)
+		return session{}, err
 	}
 	s := session{Ref: res.GetUploadId(), Offset: res.GetCommittedOffset(), MaxChunk: int(res.GetMaxChunkBytes())}
 	if s.Offset < r.Size {
 		return s, nil
 	}
 	// Every byte is committed but no complete ack was seen: ask Status.
-	st, err := g.c.Status(ctx, &uploadv1.StatusRequest{UploadId: s.Ref})
+	var st *uploadv1.StatusResponse
+	err = withToken(ctx, g.tokens, func(token string) error {
+		var err error
+		if st, err = g.c.Status(withBearer(ctx, token), &uploadv1.StatusRequest{UploadId: s.Ref}); err != nil {
+			return grpcErr("status", err)
+		}
+		return nil
+	})
 	if err != nil {
-		return session{}, grpcErr("status", err)
+		return session{}, err
 	}
 	if !st.GetComplete() {
 		return session{}, errors.New("status: all bytes committed, upload not yet complete")
@@ -91,8 +117,19 @@ func (g *grpcClient) begin(ctx context.Context, r Row) (session, error) {
 // while blocked, the stream is abandoned with a transient error, so the
 // retry/backoff loop runs instead of hanging (a window smaller than the
 // server's GRPC_ACK_EVERY_N can never be satisfied).
+//
+// A stream rejected as token_expired is opened once more, after a token
+// refresh, from the last acked offset.
 func (g *grpcClient) send(ctx context.Context, r Row, s session, src io.ReaderAt, chunk int, p *progress) error {
-	ctx, cancel := context.WithCancel(g.auth(ctx))
+	return withToken(ctx, g.tokens, func(token string) error {
+		s.Offset = max(s.Offset, p.ackedOffset())
+		return g.stream(withBearer(ctx, token), r, s, src, chunk, p)
+	})
+}
+
+// stream runs one Upload stream from s.Offset.
+func (g *grpcClient) stream(ctx context.Context, r Row, s session, src io.ReaderAt, chunk int, p *progress) error {
+	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	stream, err := g.c.Upload(ctx)
 	if err != nil {

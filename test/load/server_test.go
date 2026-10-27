@@ -27,6 +27,12 @@ import (
 	"github.com/resyahrial/sensor-upload-server/internal/db"
 )
 
+// jwtIssuer is the JWT_ISSUER of the load test server.
+const jwtIssuer = "sensor-upload-load"
+
+// tokenTTL outlives any load run, so a client never sees token_expired.
+const tokenTTL = 24 * time.Hour
+
 const (
 	rssInterval  = 250 * time.Millisecond
 	readyTimeout = 90 * time.Second
@@ -40,11 +46,11 @@ type server struct {
 	Native string // 127.0.0.1:port of the native gRPC listener
 	ObjDir string
 	Repo   *db.Repo
-	Keys   *db.DeviceKeys
+	Issuer *auth.Issuer // mints access tokens for the server's signing key
 	PID    int
 
 	tokensMu sync.Mutex
-	tokens   map[string]string // device -> token (one key per device)
+	tokens   map[string]string // device -> access token, minted once
 
 	cmd  *exec.Cmd
 	done chan struct{}
@@ -88,25 +94,43 @@ func startServer(t *testing.T) *server {
 	}
 	defer logf.Close() // the child keeps its own descriptor
 
+	signingKey, err := auth.GenerateSigningKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Issuer, err = auth.NewIssuer(auth.IssuerConfig{Key: signingKey, Issuer: jwtIssuer, TTL: tokenTTL}); err != nil {
+		t.Fatal(err)
+	}
+	pemKey, err := auth.EncodePrivateKey(signingKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signingKeyFile := filepath.Join(dir, "jwt-signing.pem")
+	if err := os.WriteFile(signingKeyFile, pemKey, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
 	env := map[string]string{
-		"LISTEN_ADDR":        "127.0.0.1:" + port,
-		"METRICS_ADDR":       "127.0.0.1:" + adminPort,
-		"GRPC_NATIVE_ADDR":   "127.0.0.1:" + nativePort,
-		"TLS_CERT_FILE":      certFile,
-		"TLS_KEY_FILE":       keyFile,
-		"DATABASE_URL":       testDSN,
-		"STAGING_DIR":        filepath.Join(dir, "staging"),
-		"OBJSTORE_LOCAL_DIR": s.ObjDir,
-		"LOG_LEVEL":          "warn",
-		"MAX_FILE_BYTES":     strconv.FormatInt(max(cfg.FileSize, 500<<20), 10),
-		"SHUTDOWN_TIMEOUT":   "10s",
+		"LISTEN_ADDR":          "127.0.0.1:" + port,
+		"METRICS_ADDR":         "127.0.0.1:" + adminPort,
+		"GRPC_NATIVE_ADDR":     "127.0.0.1:" + nativePort,
+		"TLS_CERT_FILE":        certFile,
+		"TLS_KEY_FILE":         keyFile,
+		"DATABASE_URL":         testDSN,
+		"JWT_SIGNING_KEY_FILE": signingKeyFile,
+		"JWT_ISSUER":           jwtIssuer,
+		"STAGING_DIR":          filepath.Join(dir, "staging"),
+		"OBJSTORE_LOCAL_DIR":   s.ObjDir,
+		"LOG_LEVEL":            "warn",
+		"MAX_FILE_BYTES":       strconv.FormatInt(max(cfg.FileSize, 500<<20), 10),
+		"SHUTDOWN_TIMEOUT":     "10s",
 		// The developer's disk may be past 85%: no disk-pressure deletes
 		// of the uploads under test.
 		"DISK_HIGH_WATERMARK": "100",
 		"DISK_LOW_WATERMARK":  "99",
-		"GOMAXPROCS":         strconv.Itoa(cfg.ServerProcs),
-		"HOME":               dir,
-		"PATH":               os.Getenv("PATH"),
+		"GOMAXPROCS":          strconv.Itoa(cfg.ServerProcs),
+		"HOME":                dir,
+		"PATH":                os.Getenv("PATH"),
 	}
 	s.cmd = exec.Command(serverBin)
 	for k, v := range env {
@@ -132,29 +156,25 @@ func startServer(t *testing.T) *server {
 	}
 	t.Cleanup(pool.Close)
 	s.Repo = db.NewRepo(pool)
-	s.Keys = db.NewDeviceKeys(pool)
 	return s
 }
 
-// token returns the device token for device, storing a new key in
-// device_keys on the first call (later calls reuse it).
-func (s *server) token(ctx context.Context, device string) (string, error) {
+// token returns an access token for device (valid for tokenTTL), minted
+// on the first call and reused later. ctx is unused; it keeps the call
+// sites unchanged.
+func (s *server) token(_ context.Context, device string) (string, error) {
 	s.tokensMu.Lock()
 	defer s.tokensMu.Unlock()
 	if tok, ok := s.tokens[device]; ok {
 		return tok, nil
 	}
-	key, err := auth.GenerateKey()
+	tok, _, err := s.Issuer.Issue(device)
 	if err != nil {
-		return "", err
-	}
-	if err := s.Keys.Set(ctx, device, auth.HashKey(key)); err != nil {
 		return "", err
 	}
 	if s.tokens == nil {
 		s.tokens = map[string]string{}
 	}
-	tok := auth.FormatToken(device, key)
 	s.tokens[device] = tok
 	return tok, nil
 }

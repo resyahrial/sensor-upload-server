@@ -93,6 +93,11 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done and merged · `[!]` blocke
 - [x] `wt/devicekey` (merged): replace JWT with `Authorization: Bearer {device_id}_{key}` (split at last `_`; SHA-256 of key in Postgres `device_keys`; one active key per device, UPSERT replaces). New `cmd/devicekey` (set/delete/list), `make device-key`, `make vps-device-key`. README: Authentication + Where files are stored sections, feature overview. MQTT rotation is future work.
 - [x] Merge, gates (build, vet ×4 tags, test, integration 21 packages, lint), update `master`. Remote suite 14/14 with device keys.
 
+## Wave 9 — JWT access tokens + rotating refresh tokens (`feat/jwt-refresh`)
+- [x] Foundation (b35e3a5): `internal/auth` ES256 issuer/verifier, key loading, refresh secrets; config (`JWT_*`, `ACCESS_TOKEN_TTL`, `REFRESH_*`, `REGISTER_RETRY_AFTER`); wiring in `internal/app`.
+- [~] Parallel agents: device endpoints (register/refresh), upload auth + `devicectl` + make targets, uploader/experiment/remote suite, docs.
+- [x] Docs: README "Authentication" rewritten, `docs/decisions.md` "Decisions (JWT + refresh)" (device keys marked superseded), `docs/acceptance.md` notes, `sensor-upload-integration.md` (register/approve + token refresh, client snippets).
+
 ## Notes / issues
 - Wave 4 acceptance: the podman VM clock drifted up to 5 h behind the host, causing JWT 401s and MinIO 403s. Fixed by re-stepping the VM clock; documented in the README.
 - Wave 4 B: building the full Dockerfile inside the podman VM gets OOM-killed (2 GB VM, about 520 MB free because of other containers). Image size was verified with cross-compiled binaries in the same distroless stage. HTTP/3 loopback throughput is about 4.5× lower than HTTP/2 (QUIC runs in user space, 2 cores).

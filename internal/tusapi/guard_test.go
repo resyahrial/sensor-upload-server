@@ -217,7 +217,7 @@ func TestShutdownBeforeTusd(t *testing.T) {
 		cancel(handler.ErrServerShutdown)
 		req := httptest.NewRequestWithContext(ctx, http.MethodHead, BasePathREST+ref, nil)
 		req.Header.Set("Tus-Resumable", "1.0.0")
-		req.Header.Set("Authorization", "Bearer dev:dev-0001")
+		req.Header.Set("Authorization", "Bearer "+f.token("dev-0001"))
 		rec := httptest.NewRecorder()
 		f.mux.ServeHTTP(rec, req)
 		return rec

@@ -72,7 +72,8 @@ type Finalizer interface {
 }
 
 // Verifier authenticates a request's Authorization header (*auth.Verifier).
-// Errors wrap auth.ErrUnauthenticated (401) or auth.ErrUnavailable (503).
+// Errors wrap auth.ErrTokenExpired (401 token_expired) or anything else
+// (401 invalid_token).
 type Verifier interface {
 	VerifyHeader(ctx context.Context, header string) (string, error)
 }
@@ -144,9 +145,30 @@ func tusError(status int, code, msg string) handler.Error {
 	}
 }
 
+// authError builds an auth failure with the JSON body {"error":code}
+// shared with the device API. A 401 also carries the RFC 6750 challenge,
+// whose error_description repeats code: HEAD responses have no body, so
+// clients tell token_expired from invalid_token by the header.
+func authError(status int, tusCode, code string) handler.Error {
+	hdr := handler.HTTPHeader{"Content-Type": "application/json"}
+	if status == http.StatusUnauthorized {
+		hdr["WWW-Authenticate"] = `Bearer error="invalid_token", error_description="` + code + `"`
+	}
+	return handler.Error{
+		ErrorCode: tusCode,
+		Message:   code,
+		HTTPResponse: handler.HTTPResponse{
+			StatusCode: status,
+			Body:       `{"error":"` + code + `"}`,
+			Header:     hdr,
+		},
+	}
+}
+
 var (
-	errUnauthenticated = tusError(http.StatusUnauthorized, "ERR_UNAUTHENTICATED", "unauthenticated")
-	errForbidden       = tusError(http.StatusForbidden, "ERR_PERMISSION_DENIED", "device_id does not match token")
+	errUnauthenticated = authError(http.StatusUnauthorized, "ERR_UNAUTHENTICATED", "invalid_token")
+	errTokenExpired    = authError(http.StatusUnauthorized, "ERR_TOKEN_EXPIRED", "token_expired")
+	errForbidden       = authError(http.StatusForbidden, "ERR_PERMISSION_DENIED", "device_not_active")
 	errNotFound        = tusError(http.StatusNotFound, "ERR_UPLOAD_NOT_FOUND", "upload not found")
 	errExpired         = tusError(http.StatusGone, "ERR_UPLOAD_EXPIRED", "upload expired")
 	errChecksum        = tusError(StatusChecksumMismatch, "ERR_CHECKSUM_MISMATCH", "sha256 mismatch")
@@ -161,9 +183,6 @@ var (
 	}
 	errInternal     = tusError(http.StatusInternalServerError, "ERR_INTERNAL", "internal error")
 	errShuttingDown = tusError(http.StatusServiceUnavailable, "ERR_SERVER_SHUTDOWN", "server shutting down")
-	// errAuthUnavailable: the device key could not be looked up (database
-	// down); the client retries like for any 503.
-	errAuthUnavailable = tusError(http.StatusServiceUnavailable, "ERR_AUTH_UNAVAILABLE", "authentication temporarily unavailable")
 	errLocked       = tusError(http.StatusLocked, "ERR_UPLOAD_LOCKED", "upload is locked")
 )
 

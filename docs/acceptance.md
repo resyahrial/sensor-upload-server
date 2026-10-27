@@ -1,12 +1,13 @@
 # Acceptance (requirements §15)
 
-> **Auth changed since these runs.** Every run recorded below used the old
-> JWT auth (`cmd/devtoken`, ES256/HS256), which has been replaced by
-> per-device keys (README "Authentication", docs/decisions.md "Decisions
-> (device keys)"). The results are kept as recorded. To repeat a run today,
-> build only `./cmd/uploader` and replace each `devtoken` command with
-> `TOKEN=$(make -s device-key DEVICE=<device>)` (dev stack) or
-> `make -s vps-device-key VPS=... VPS_DEVICE=<device>` (VPS).
+> **Auth changed since these runs.** Every run recorded below used the first
+> JWT auth (`cmd/devtoken`, ES256/HS256). It was replaced by per-device keys
+> and then by ES256 access tokens + rotating refresh tokens (README
+> "Authentication", docs/decisions.md "Decisions (JWT + refresh)"). The
+> results are kept as recorded. To repeat a run today, build only
+> `./cmd/uploader` and replace each `devtoken` command with
+> `TOKEN=$(make -s device-token DEVICE=<device> TTL=12h)` (dev stack) or
+> `make -s vps-device-token VPS=... VPS_DEVICE=<device> TTL=12h` (VPS).
 
 Run on 2026-10-21 against the real compose stack (server image built from
 this branch, PostgreSQL 16, MinIO `OBJSTORE=s3`, tus `file` staging), started as
@@ -17,7 +18,7 @@ export SERVER_IMAGE=localhost/sensor-upload-server:acc COMPOSE_NETWORK=sensor-up
 make up COMPOSE="podman compose -p sensor-upload-acc" \
   HOST_HTTPS_PORT=38443 HOST_GRPC_PORT=39090 HOST_METRICS_PORT=39100
 go build -o bin/ ./cmd/uploader ./cmd/devtoken                  # historical (JWT)
-TOKEN=$(bin/devtoken -device dev-1 -alg ES256 -key certs/jwt.key) # today: TOKEN=$(make -s device-key DEVICE=dev-1 COMPOSE=...)
+TOKEN=$(bin/devtoken -device dev-1 -alg ES256 -key certs/jwt.key) # today: TOKEN=$(make -s device-token DEVICE=dev-1 COMPOSE=...)
 ```
 
 Endpoints: `rest` and `rest-http3` = `https://localhost:38443` (TCP / QUIC),
@@ -217,11 +218,13 @@ Concurrent duplicates:
 
 ## 6. Auth — PASS
 
-*Historical: run with the old JWT auth. The device-key equivalents (missing,
-malformed, wrong key, unknown device, rotated key → 401 / `UNAUTHENTICATED`;
-key store down → 503 / `UNAVAILABLE`) are covered by `TestAuthFailures` and
-`TestGRPCAuth` (test/e2e), the tusapi/grpcapi `DeviceKey` tests and
-`TestRemoteBadToken`.*
+*Historical: run with the first JWT auth. The current verifier rejects the
+same variants (missing, expired, wrongly signed, tampered, HS256, `alg:
+none`, garbage), plus unknown `kid` and wrong `aud`/`iss`; expired gives
+401 `token_expired`, the rest 401 `invalid_token` (gRPC `UNAUTHENTICATED`
+with the same message). Covered by the `internal/auth` unit tests, the
+tus/gRPC auth tests in test/e2e and `TestRemoteBadToken`; this table was
+not re-run.*
 
 Every token variant against every endpoint, including requests on an
 existing upload (HEAD/PATCH, Status/Upload):
@@ -278,7 +281,7 @@ The server was then recreated with the defaults (168h / 1h).
 
 ```sh
 make netem-image        # rebuilt from this branch (needed the stack stopped: compiling sqlite OOMs the 2 GB VM otherwise)
-TOKEN=<devtoken -device netem-0001 -ttl 12h, issued inside a container — see "Decisions (acceptance)", clock skew>   # historical (JWT); today: $(make -s device-key DEVICE=netem-0001)
+TOKEN=<devtoken -device netem-0001 -ttl 12h, issued inside a container — see "Decisions (acceptance)", clock skew>   # historical (JWT); today: $(make -s device-token DEVICE=netem-0001 TTL=72h)
 NETEM_NETWORK=sensor-upload-acc_net make experiment-smoke TOKEN="$TOKEN" CA_FILE=certs/server.crt
 ```
 
@@ -331,7 +334,7 @@ clock checked in step first). The driver was called directly because
 image in the VM:
 
 ```sh
-# historical (JWT); today: TOKEN=$(make -s device-key DEVICE=netem-0001)
+# historical (JWT); today: TOKEN=$(make -s device-token DEVICE=netem-0001 TTL=72h)
 TOKEN=$(bin/devtoken -device netem-0001 -alg ES256 -key certs/jwt.key -ttl 12h) \
 CA_FILE=$PWD/certs/server.crt RESULTS_DIR=$PWD/results \
 NETEM_IMAGE=localhost/sensor-uploader-netem:acc2 NETEM_NETWORK=sensor-upload-acc2_net CONTAINER_RT=podman \

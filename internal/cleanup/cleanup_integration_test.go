@@ -14,6 +14,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -30,7 +31,7 @@ import (
 	"google.golang.org/grpc/test/bufconn"
 
 	uploadv1 "github.com/resyahrial/sensor-upload-server/gen/upload/v1"
-	"github.com/resyahrial/sensor-upload-server/internal/auth"
+	"github.com/resyahrial/sensor-upload-server/internal/auth/authtest"
 	"github.com/resyahrial/sensor-upload-server/internal/config"
 	"github.com/resyahrial/sensor-upload-server/internal/db"
 	"github.com/resyahrial/sensor-upload-server/internal/finalize"
@@ -50,9 +51,17 @@ const (
 )
 
 var (
-	testDSN string
-	keys    = auth.NewMemoryStore()
+	testDSN  string
+	keysOnce sync.Once
+	testKeys *authtest.Keys
 )
+
+// keys returns the signing key shared by every server in the package (a
+// restarted server keeps accepting earlier tokens).
+func keys(t *testing.T) *authtest.Keys {
+	keysOnce.Do(func() { testKeys = authtest.New(t) })
+	return testKeys
+}
 
 func TestMain(m *testing.M) { os.Exit(runWithPostgres(m)) }
 
@@ -80,11 +89,7 @@ func runWithPostgres(m *testing.M) int {
 
 func authCtx(t *testing.T) context.Context {
 	t.Helper()
-	tok, err := keys.Token(itDevice)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return metadata.AppendToOutgoingContext(t.Context(), "authorization", "Bearer "+tok)
+	return metadata.AppendToOutgoingContext(t.Context(), "authorization", keys(t).Bearer(t, itDevice))
 }
 
 func initReq(t *testing.T, size int) ([]byte, *uploadv1.InitRequest) {
@@ -155,10 +160,7 @@ func newITEnv(t *testing.T) *itEnv {
 	if err != nil {
 		t.Fatal(err)
 	}
-	verifier, err := auth.NewVerifier(keys, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
+	verifier := keys(t).Verifier
 	metrics, err := obs.NewMetrics(prometheus.NewRegistry())
 	if err != nil {
 		t.Fatal(err)

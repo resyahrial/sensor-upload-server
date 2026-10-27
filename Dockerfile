@@ -11,13 +11,13 @@ ARG TARGETARCH
 # -p 1 and GOGC=25 keep peak compile memory low enough for a 2 GB podman VM
 # (compiling aws-sdk-go-v2/service/s3 is the peak).
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} GOGC=25 \
-    go build -p 1 -trimpath -ldflags="-s -w" -o /out/ ./cmd/server ./cmd/devicekey \
+    go build -p 1 -trimpath -ldflags="-s -w" -o /out/ ./cmd/server ./cmd/devicectl \
  && mkdir -p /out/data/staging /out/data/objects
 
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /out/server /server
-# Device key admin: docker compose exec server /devicekey set -device ID
-COPY --from=build /out/devicekey /devicekey
+# Device admin: docker compose exec server /devicectl list | approve | issue | access-token ...
+COPY --from=build /out/devicectl /devicectl
 # Pre-create /data owned by the nonroot user so named volumes inherit it.
 COPY --from=build --chown=65532:65532 /out/data /data
 USER nonroot:nonroot

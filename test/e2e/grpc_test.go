@@ -293,29 +293,29 @@ func TestGRPCAuth(t *testing.T) {
 	id := owner.MustInit(f).GetUploadId()
 	bad := badTokens(t, dev)
 	for _, m := range grpcModes {
-		for name, tok := range bad {
+		for name, bt := range bad {
 			t.Run(m.name+"/"+name, func(t *testing.T) {
 				g := DialGRPC(t, s, m, dev)
-				g.Token = tok
+				g.Token = bt.token
 				_, err := g.C.Init(g.Ctx(), InitReq(f, ""))
-				WantCode(t, "Init", err, codes.Unauthenticated)
+				WantStatus(t, "Init", err, codes.Unauthenticated, bt.code)
 				_, err = g.C.Status(g.Ctx(), &uploadv1.StatusRequest{UploadId: id})
-				WantCode(t, "Status", err, codes.Unauthenticated)
+				WantStatus(t, "Status", err, codes.Unauthenticated, bt.code)
 				_, err = g.C.Cancel(g.Ctx(), &uploadv1.CancelRequest{UploadId: id})
-				WantCode(t, "Cancel", err, codes.Unauthenticated)
+				WantStatus(t, "Cancel", err, codes.Unauthenticated, bt.code)
 				st, err := g.C.Upload(g.Ctx())
 				if err == nil {
 					_ = st.Send(&uploadv1.Chunk{UploadId: id, Offset: 0, Data: f.Data})
 					_, err = st.Recv()
 				}
-				WantCode(t, "Upload", err, codes.Unauthenticated)
+				WantStatus(t, "Upload", err, codes.Unauthenticated, bt.code)
 			})
 		}
 	}
 
 	other := DialGRPC(t, s, grpcModes[2], device())
 	_, err := other.C.Init(other.Ctx(), InitReq(f, ""))
-	WantCode(t, "Init with another device's metadata", err, codes.PermissionDenied)
+	WantStatus(t, "Init with another device's metadata", err, codes.PermissionDenied, "device_not_active")
 	_, err = other.C.Status(other.Ctx(), &uploadv1.StatusRequest{UploadId: id})
 	WantCode(t, "cross-device Status", err, codes.NotFound)
 	_, err = other.C.Cancel(other.Ctx(), &uploadv1.CancelRequest{UploadId: id})

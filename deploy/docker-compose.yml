@@ -1,6 +1,8 @@
 # Local stack: upload server + PostgreSQL + MinIO.
 # Start with `make up` (runs `make devcert` first), stop with `make down`.
-# Device keys: `make device-key DEVICE=netem-0001` prints a bearer token.
+# Devices: `make device-batch DEVICE=netem-0001` registers one (active), then
+# `make -s device-token DEVICE=netem-0001` prints an access JWT and
+# `make -s device-issue DEVICE=netem-0001` a token pair (see the Makefile).
 # DEV ONLY: MinIO/Postgres default credentials, plain-HTTP
 # admin port. Host ports are published on 127.0.0.1 only (HOST_BIND; set it to
 # 0.0.0.0 only on a trusted network) and default to 18443 (TCP+UDP), 19090
@@ -67,6 +69,8 @@ services:
       METRICS_ADDR: ":9100"
       TLS_CERT_FILE: /certs/server.crt
       TLS_KEY_FILE: /certs/server.key
+      # ES256 access-token signing key from `make devcert` (dev only).
+      JWT_SIGNING_KEY_FILE: /certs/jwt.key
       DATABASE_URL: postgres://upload:upload@postgres:5432/upload?sslmode=disable
       STAGING_DIR: /data/staging
       OBJSTORE: s3

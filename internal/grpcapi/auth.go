@@ -20,11 +20,12 @@ func deviceFrom(ctx context.Context) string {
 	return d
 }
 
+// Auth failures; the messages are the same codes as the REST JSON bodies.
 var (
-	errUnauthenticated = status.Error(codes.Unauthenticated, "missing or invalid token")
-	// errAuthUnavailable: the device key could not be looked up (database
-	// down); clients retry UNAVAILABLE.
-	errAuthUnavailable = status.Error(codes.Unavailable, "authentication temporarily unavailable")
+	errUnauthenticated = status.Error(codes.Unauthenticated, "invalid_token")
+	// errTokenExpired: the device refreshes its access token and retries.
+	errTokenExpired = status.Error(codes.Unauthenticated, "token_expired")
+	errForbidden    = status.Error(codes.PermissionDenied, "device_not_active")
 )
 
 // authenticate rejects calls during shutdown and verifies the bearer token
@@ -43,11 +44,10 @@ func (s *Service) authenticate(ctx context.Context) (context.Context, error) {
 	}
 	device, err := s.verifier.VerifyHeader(ctx, vals[0])
 	if err != nil {
-		if errors.Is(err, auth.ErrUnavailable) {
-			s.log.Warn("authentication unavailable", "error", err.Error())
-			return nil, errAuthUnavailable
-		}
 		s.log.Info("authentication failed", "error", err.Error())
+		if errors.Is(err, auth.ErrTokenExpired) {
+			return nil, errTokenExpired
+		}
 		return nil, errUnauthenticated
 	}
 	return context.WithValue(ctx, deviceKey{}, device), nil

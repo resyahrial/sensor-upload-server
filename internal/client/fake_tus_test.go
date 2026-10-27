@@ -32,6 +32,11 @@ type fakeTus struct {
 	onCreate func(w http.ResponseWriter, r *http.Request) bool
 	// corruptOnce makes the next completion fail the checksum (460).
 	corruptOnce bool
+	// authorize checks the Authorization header and returns 0 to accept,
+	// or a status and JSON error code to reject. nil accepts "Bearer tok".
+	authorize func(header string) (int, string)
+	// rejected counts requests refused by authorize.
+	rejected int
 }
 
 type fakeUpload struct {
@@ -66,8 +71,18 @@ func parseMeta(h string) map[string]string {
 }
 
 func (f *fakeTus) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.Header.Get("Tus-Resumable") != "1.0.0" || r.Header.Get("Authorization") != "Bearer tok" {
+	if r.Header.Get("Tus-Resumable") != "1.0.0" {
 		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	if code, reason := f.checkAuth(r.Header.Get("Authorization")); code != 0 {
+		f.mu.Lock()
+		f.rejected++
+		f.record(r, code)
+		f.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(code)
+		_, _ = fmt.Fprintf(w, `{"error":%q}`, reason)
 		return
 	}
 	switch {
@@ -80,6 +95,16 @@ func (f *fakeTus) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		w.WriteHeader(http.StatusNotFound)
 	}
+}
+
+func (f *fakeTus) checkAuth(header string) (int, string) {
+	if f.authorize != nil {
+		return f.authorize(header)
+	}
+	if header != "Bearer tok" {
+		return http.StatusUnauthorized, "invalid_token"
+	}
+	return 0, ""
 }
 
 func (f *fakeTus) create(w http.ResponseWriter, r *http.Request) {

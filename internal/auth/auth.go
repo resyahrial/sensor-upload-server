@@ -1,159 +1,133 @@
-// Package auth verifies per-device keys (FR-2, replaced JWTs; see
-// docs/decisions.md "Decisions (device keys)").
+// Package auth issues and verifies device access tokens (FR-2) and the
+// opaque secrets used for refresh tokens and registration poll secrets (see
+// docs/decisions.md "Decisions (JWT + refresh)").
 //
-// A device authenticates with "Authorization: Bearer {device_id}_{key}"
-// (gRPC: the same value in the "authorization" metadata). The token is split
-// at its last "_": device_id before, key after. Keys are 64 lowercase hex
-// characters (32 random bytes), so they never contain "_". The server keeps
-// only SHA-256(key) per device (table device_keys) and compares hashes in
-// constant time.
+// An access token is an ES256 JWT with sub = device_id, aud = Audience, the
+// configured iss, iat and exp, and a kid header naming the signing key
+// (KeyID). Verification is stateless: no database lookup per request.
 package auth
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/sha256"
-	"crypto/subtle"
-	"encoding/hex"
+	"crypto/ecdsa"
 	"errors"
 	"fmt"
 	"strings"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
+
 	"github.com/resyahrial/sensor-upload-server/internal/meta"
 )
 
-// KeyBytes is the number of random bytes in a device key; the key is their
-// lowercase hex encoding (KeyHexLen characters).
-const (
-	KeyBytes  = 32
-	KeyHexLen = 2 * KeyBytes
-)
+// Audience is the aud claim of every access token.
+const Audience = "sensor-upload"
 
-// DefaultLookupTimeout bounds one key lookup in the store.
-const DefaultLookupTimeout = 2 * time.Second
+// Leeway is the allowed clock skew for exp, nbf and iat.
+const Leeway = 120 * time.Second
 
 var (
-	// ErrUnauthenticated means the token is missing, malformed, names an
-	// unknown device or carries the wrong key (401 / UNAUTHENTICATED). The
-	// cases are not distinguished for clients (no device enumeration).
+	// ErrUnauthenticated means the token is missing, malformed, wrongly
+	// signed or for another audience (401 invalid_token / UNAUTHENTICATED).
 	ErrUnauthenticated = errors.New("unauthenticated")
-	// ErrPermissionDenied means the token is valid but its device_id does not
-	// match the request (403 / PERMISSION_DENIED).
+	// ErrTokenExpired means the token is otherwise valid but past exp
+	// (401 token_expired); the device refreshes and retries. It is not
+	// wrapped in ErrUnauthenticated so callers can tell the two apart.
+	ErrTokenExpired = errors.New("token expired")
+	// ErrPermissionDenied means the token is valid but its device_id does
+	// not match the request (403 device_not_active / PERMISSION_DENIED).
 	ErrPermissionDenied = errors.New("permission denied")
-	// ErrUnavailable means the key store could not be queried (503 /
-	// UNAVAILABLE): the client should retry, not treat its key as bad.
-	ErrUnavailable = errors.New("authentication unavailable")
 )
 
-// KeyStore looks up the stored SHA-256 hash of a device's key. found is
-// false for a device without a key; err is reserved for store failures.
-type KeyStore interface {
-	KeyHash(ctx context.Context, device string) (hash []byte, found bool, err error)
+// Claims is the access token payload; Subject is the device_id.
+type Claims struct {
+	jwt.RegisteredClaims
 }
 
-// Verifier checks device tokens against a KeyStore.
+// VerifierConfig configures a Verifier.
+type VerifierConfig struct {
+	// Issuer is the required iss claim.
+	Issuer string
+	// Keys are the accepted public keys by kid (see KeyID). During a
+	// signing-key rollover it holds both the old and the new key.
+	Keys map[string]*ecdsa.PublicKey
+	// Now overrides the clock (tests); defaults to time.Now.
+	Now func() time.Time
+}
+
+// Verifier validates access tokens and extracts the device_id.
 type Verifier struct {
-	store   KeyStore
-	timeout time.Duration
+	keys   map[string]*ecdsa.PublicKey
+	parser *jwt.Parser
 }
 
-// NewVerifier returns a Verifier using store; timeout bounds each lookup
-// (0 = DefaultLookupTimeout).
-func NewVerifier(store KeyStore, timeout time.Duration) (*Verifier, error) {
-	if store == nil {
-		return nil, errors.New("auth: key store is required")
+// NewVerifier checks cfg and returns a Verifier.
+func NewVerifier(cfg VerifierConfig) (*Verifier, error) {
+	if cfg.Issuer == "" {
+		return nil, errors.New("auth: issuer is required")
 	}
-	if timeout <= 0 {
-		timeout = DefaultLookupTimeout
+	if len(cfg.Keys) == 0 {
+		return nil, errors.New("auth: at least one verification key is required")
 	}
-	return &Verifier{store: store, timeout: timeout}, nil
+	keys := make(map[string]*ecdsa.PublicKey, len(cfg.Keys))
+	for kid, k := range cfg.Keys {
+		if k == nil {
+			return nil, fmt.Errorf("auth: verification key %q is nil", kid)
+		}
+		keys[kid] = k
+	}
+	opts := []jwt.ParserOption{
+		jwt.WithValidMethods([]string{jwt.SigningMethodES256.Alg()}),
+		jwt.WithLeeway(Leeway),
+		jwt.WithExpirationRequired(),
+		jwt.WithIssuedAt(), // reject iat in the future beyond the leeway
+		jwt.WithIssuer(cfg.Issuer),
+		jwt.WithAudience(Audience),
+	}
+	if cfg.Now != nil {
+		opts = append(opts, jwt.WithTimeFunc(cfg.Now))
+	}
+	return &Verifier{keys: keys, parser: jwt.NewParser(opts...)}, nil
 }
 
-// Verify checks token ("{device_id}_{key}") and returns its device_id.
-// Failures wrap ErrUnauthenticated or ErrUnavailable; the detail is for
-// logs only and never contains the key.
-func (v *Verifier) Verify(ctx context.Context, token string) (string, error) {
-	device, key, err := ParseToken(token)
-	if err != nil {
-		return "", err
+// Verify parses and validates token and returns its device_id. Failures
+// wrap ErrTokenExpired or ErrUnauthenticated; the detail is for logs, not
+// clients, and never contains the token.
+func (v *Verifier) Verify(token string) (string, error) {
+	var claims Claims
+	if _, err := v.parser.ParseWithClaims(token, &claims, v.key); err != nil {
+		// Only an expired but correctly signed token is token_expired: the
+		// parser checks the signature before the claims.
+		if errors.Is(err, jwt.ErrTokenExpired) && !errors.Is(err, jwt.ErrTokenSignatureInvalid) {
+			return "", fmt.Errorf("%w: %w", ErrTokenExpired, err)
+		}
+		return "", fmt.Errorf("%w: %w", ErrUnauthenticated, err)
 	}
-	ctx, cancel := context.WithTimeout(ctx, v.timeout)
-	defer cancel()
-	stored, found, err := v.store.KeyHash(ctx, device)
-	if err != nil {
-		return "", fmt.Errorf("%w: key lookup for device %q: %w", ErrUnavailable, device, err)
+	if !meta.ValidDeviceID(claims.Subject) {
+		return "", fmt.Errorf("%w: sub is not a valid device_id", ErrUnauthenticated)
 	}
-	if !found {
-		return "", fmt.Errorf("%w: unknown device %q", ErrUnauthenticated, device)
-	}
-	if subtle.ConstantTimeCompare(HashKey(key), stored) != 1 {
-		return "", fmt.Errorf("%w: wrong key for device %q", ErrUnauthenticated, device)
-	}
-	return device, nil
+	return claims.Subject, nil
 }
 
 // VerifyHeader extracts the bearer token from an Authorization header
-// value and verifies it.
-func (v *Verifier) VerifyHeader(ctx context.Context, header string) (string, error) {
+// value and verifies it. ctx is unused today; it keeps the signature stable
+// for a future revocation check.
+func (v *Verifier) VerifyHeader(_ context.Context, header string) (string, error) {
 	token, err := BearerToken(header)
 	if err != nil {
 		return "", err
 	}
-	return v.Verify(ctx, token)
+	return v.Verify(token)
 }
 
-// ParseToken splits token at its last "_" into device_id and key. The
-// device_id must satisfy the metadata rules (meta.ValidDeviceID) and the key
-// must be KeyHexLen lowercase hex characters.
-func ParseToken(token string) (device, key string, err error) {
-	i := strings.LastIndexByte(token, '_')
-	if i < 0 {
-		return "", "", fmt.Errorf("%w: token is not {device_id}_{key}", ErrUnauthenticated)
+func (v *Verifier) key(t *jwt.Token) (any, error) {
+	kid, _ := t.Header["kid"].(string)
+	k, ok := v.keys[kid]
+	if !ok {
+		return nil, fmt.Errorf("unknown kid %q", kid)
 	}
-	device, key = token[:i], token[i+1:]
-	if !meta.ValidDeviceID(device) {
-		return "", "", fmt.Errorf("%w: token device_id is invalid", ErrUnauthenticated)
-	}
-	if !ValidKey(key) {
-		return "", "", fmt.Errorf("%w: token key is not %d lowercase hex characters", ErrUnauthenticated, KeyHexLen)
-	}
-	return device, key, nil
+	return k, nil
 }
-
-// ValidKey reports whether key is KeyHexLen lowercase hex characters.
-func ValidKey(key string) bool {
-	if len(key) != KeyHexLen {
-		return false
-	}
-	for i := 0; i < len(key); i++ {
-		c := key[i]
-		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
-			return false
-		}
-	}
-	return true
-}
-
-// GenerateKey returns a new random key (KeyBytes from crypto/rand, hex).
-func GenerateKey() (string, error) {
-	b := make([]byte, KeyBytes)
-	if _, err := rand.Read(b); err != nil {
-		return "", fmt.Errorf("auth: generate key: %w", err)
-	}
-	return hex.EncodeToString(b), nil
-}
-
-// HashKey returns SHA-256(key), the value stored in device_keys.key_hash.
-// A plain hash suffices: keys are 256-bit random values, so there is
-// nothing to brute-force and no need for a slow password hash.
-func HashKey(key string) []byte {
-	h := sha256.Sum256([]byte(key))
-	return h[:]
-}
-
-// FormatToken returns the bearer token "{device_id}_{key}".
-func FormatToken(device, key string) string { return device + "_" + key }
 
 // BearerToken returns the token from an "Authorization: Bearer <token>"
 // header value. The scheme is case-insensitive.

@@ -16,10 +16,10 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sort"
-	"strings"
 	"syscall"
 	"time"
 
+	"github.com/resyahrial/sensor-upload-server/internal/auth"
 	"github.com/resyahrial/sensor-upload-server/internal/client"
 )
 
@@ -35,14 +35,16 @@ func main() {
 }
 
 type options struct {
-	cfg      client.Config
-	file     string
-	dir      string
-	report   string
-	state    string
-	ca       string
-	insecure bool
-	verbose  bool
+	cfg         client.Config
+	refreshFile string
+	authURL     string
+	file        string
+	dir         string
+	report      string
+	state       string
+	ca          string
+	insecure    bool
+	verbose     bool
 }
 
 func parseFlags(args []string, stderr io.Writer) (options, error) {
@@ -51,8 +53,12 @@ func parseFlags(args []string, stderr io.Writer) (options, error) {
 	fs.SetOutput(stderr)
 	fs.StringVar(&o.cfg.Protocol, "protocol", client.ProtoREST, "rest | rest-http3 | grpc | grpc-native")
 	fs.StringVar(&o.cfg.URL, "url", "https://localhost:8443", "server base URL (grpc-native: the native listener address)")
-	fs.StringVar(&o.cfg.Token, "token", os.Getenv("UPLOADER_TOKEN"), "device token {device_id}_{key} from `devicekey set` (default $UPLOADER_TOKEN)")
-	fs.StringVar(&o.cfg.Device, "device", "", "device_id (must match the token; default: the token's device_id)")
+	fs.StringVar(&o.cfg.Token, "token", os.Getenv("UPLOADER_TOKEN"),
+		"static access `JWT` (devicectl access-token); never refreshed, so an expired token stops the run (default $UPLOADER_TOKEN)")
+	fs.StringVar(&o.refreshFile, "refresh-token-file", "",
+		"token pair JSON `file` (devicectl issue output); access tokens are refreshed and the file is rewritten (0600) on every rotation")
+	fs.StringVar(&o.authURL, "auth-url", "", "server base `URL` for "+client.RefreshPath+" (default: -url; set it for grpc-native)")
+	fs.StringVar(&o.cfg.Device, "device", "", "device_id (must match the token; default: the token's sub)")
 	fs.IntVar(&o.cfg.Priority, "priority", 3, "1 alert · 2 thumbnail · 3 clip · 4 full file")
 	fs.IntVar(&o.cfg.Chunk, "chunk", 262144, "chunk size in bytes")
 	fs.IntVar(&o.cfg.Retries, "retries", 50, "retries per file after the first attempt")
@@ -72,11 +78,26 @@ func parseFlags(args []string, stderr io.Writer) (options, error) {
 	if err := fs.Parse(args); err != nil {
 		return o, err
 	}
-	if o.cfg.Device == "" {
-		// The token is {device_id}_{key}; keys never contain "_".
-		if i := strings.LastIndexByte(o.cfg.Token, '_'); i > 0 {
-			o.cfg.Device = o.cfg.Token[:i]
+	if o.refreshFile != "" {
+		// An explicit -token conflicts; a $UPLOADER_TOKEN default is ignored.
+		tokenFlag := false
+		fs.Visit(func(f *flag.Flag) { tokenFlag = tokenFlag || f.Name == "token" })
+		if tokenFlag {
+			return o, errors.New("use either -token or -refresh-token-file, not both")
 		}
+		o.cfg.Token = ""
+	} else if o.cfg.Token == "" {
+		return o, errors.New("-token (or $UPLOADER_TOKEN) or -refresh-token-file is required")
+	}
+	if o.cfg.Device == "" && o.cfg.Token != "" {
+		d, err := auth.DeviceFromToken(o.cfg.Token)
+		if err != nil {
+			return o, fmt.Errorf("cannot take the device_id from -token (%w); pass -device", err)
+		}
+		o.cfg.Device = d
+	}
+	if o.authURL == "" {
+		o.authURL = o.cfg.URL
 	}
 	if (o.file == "") == (o.dir == "") {
 		return o, errors.New("exactly one of -file or -dir is required")
@@ -148,6 +169,20 @@ func run(args []string, stderr io.Writer) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	if o.refreshFile != "" {
+		src, err := client.NewRefreshingSource(client.RefreshConfig{
+			File: o.refreshFile, URL: o.authURL, TLS: o.cfg.TLS, Logger: o.cfg.Logger,
+		})
+		if err != nil {
+			return err
+		}
+		defer src.Close()
+		o.cfg.Tokens = src
+		if o.cfg.Device == "" {
+			o.cfg.Device = src.Device()
+		}
+	}
 
 	ob, err := client.OpenOutbox(ctx, o.state)
 	if err != nil {

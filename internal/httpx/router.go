@@ -13,6 +13,10 @@ const (
 	// PrefixFiles is the public, unauthenticated file lookup
 	// (GET /files/sha256/{sha256}, internal/fileapi).
 	PrefixFiles = "/files/sha256/"
+	// PrefixDevices is device registration and token refresh
+	// (POST /v1/devices/register, POST /v1/devices/token/refresh,
+	// internal/deviceapi).
+	PrefixDevices = "/v1/devices/"
 )
 
 // RouterConfig configures the public TLS TCP router.
@@ -27,6 +31,8 @@ type RouterConfig struct {
 	GRPC http.Handler
 	// Files, when non-nil, serves /files/sha256/ (mounted as-is).
 	Files http.Handler
+	// Devices, when non-nil, serves /v1/devices/ (mounted as-is).
+	Devices http.Handler
 	// AltSvc is the Alt-Svc header value advertising HTTP/3, e.g.
 	// `h3=":8443"`; empty = no header.
 	AltSvc string
@@ -45,6 +51,9 @@ func NewRouter(cfg RouterConfig) http.Handler {
 	mux.Handle(PrefixRESTHTTP3, http.NotFoundHandler())
 	if cfg.Files != nil {
 		mux.Handle(PrefixFiles, cfg.Files)
+	}
+	if cfg.Devices != nil {
+		mux.Handle(PrefixDevices, cfg.Devices)
 	}
 	var grpc http.Handler
 	if cfg.GRPC != nil {

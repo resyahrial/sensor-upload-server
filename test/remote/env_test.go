@@ -14,14 +14,16 @@
 //	REMOTE_CA_FILE       PEM CA or self-signed server certificate to trust
 //	REMOTE_INSECURE=1    skip TLS verification instead (fallback)
 //
-// Device tokens (from `devicekey set -device ID`, README "Authentication"):
+// Access tokens (ES256 JWTs, e.g. from `make vps-device-token DEVICE=ID`,
+// README "Authentication"):
 //
-//	REMOTE_TOKEN         {device_id}_{key} of the test device (required)
-//	REMOTE_OTHER_TOKEN   token of a second device (optional; the cross-device
-//	                     subtest skips without it)
+//	REMOTE_TOKEN         access token of the test device (required)
+//	REMOTE_OTHER_TOKEN   access token of a second device (optional; the
+//	                     cross-device subtest skips without it)
 //
-// The device is the token's device_id. Every run uploads fresh random
-// content, so reruns never collide.
+// The device is the token's sub claim. Access tokens are short-lived
+// (ACCESS_TOKEN_TTL, 1 h by default): mint them right before a run. Every
+// run uploads fresh random content, so reruns never collide.
 package remote
 
 import (
@@ -89,13 +91,13 @@ func loadEnv(getenv func(string) string) (*env, error) {
 		return nil, err
 	}
 	if e.token = getenv("REMOTE_TOKEN"); e.token == "" {
-		return nil, errors.New("REMOTE_TOKEN is required (make device-key DEVICE=..., or devicekey set -device ...)")
+		return nil, errors.New("REMOTE_TOKEN is required (make vps-device-token DEVICE=...)")
 	}
-	if e.Device, _, err = auth.ParseToken(e.token); err != nil {
+	if e.Device, err = auth.DeviceFromToken(e.token); err != nil {
 		return nil, fmt.Errorf("REMOTE_TOKEN: %w", err)
 	}
 	if e.otherToken = getenv("REMOTE_OTHER_TOKEN"); e.otherToken != "" {
-		if e.OtherDevice, _, err = auth.ParseToken(e.otherToken); err != nil {
+		if e.OtherDevice, err = auth.DeviceFromToken(e.otherToken); err != nil {
 			return nil, fmt.Errorf("REMOTE_OTHER_TOKEN: %w", err)
 		}
 		if e.OtherDevice == e.Device {
@@ -105,13 +107,13 @@ func loadEnv(getenv func(string) string) (*env, error) {
 	return e, nil
 }
 
-// Token returns the device token for e.Device.
+// Token returns the access token for e.Device.
 func (e *env) Token(t *testing.T) string {
 	t.Helper()
 	return e.token
 }
 
-// OtherToken returns the token for e.OtherDevice, skipping the test if there
+// OtherToken returns the access token for e.OtherDevice, skipping the test if there
 // is none.
 func (e *env) OtherToken(t *testing.T) string {
 	t.Helper()

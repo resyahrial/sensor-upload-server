@@ -6,8 +6,12 @@
 #   make vps-deploy    VPS=root@203.0.113.10 [VPS_ARCH=arm64]
 #   make vps-status | vps-logs [SERVICE=server FOLLOW=1] | vps-down | vps-wipe  VPS=...
 #   make vps-tunnel    VPS=...   # localhost:9100 admin/metrics, localhost:9001 MinIO console
-#   TOKEN=$$(make -s vps-device-key VPS=... VPS_DEVICE=dev-1)   # new key, prints the token once
-#   make vps-device-delete VPS=... VPS_DEVICE=dev-1 | vps-device-list VPS=...
+#   make vps-device-batch   VPS=... VPS_DEVICE=dev-1   # register dev-1 (batch import)
+#   make vps-device-approve VPS=... VPS_DEVICE=dev-1   # approve a pending device
+#   make -s vps-device-issue VPS=... VPS_DEVICE=dev-1 > tokens.json   # token pair (uploader -refresh-token-file)
+#   TOKEN=$$(make -s vps-device-token VPS=... VPS_DEVICE=dev-1 [TTL=24h])   # access JWT (uploader -token)
+#   make vps-device-revoke VPS=... VPS_DEVICE=dev-1 | vps-device-list VPS=... [STATUS=active]
+#   (VPS_DEVICE may also be given as DEVICE)
 #
 # VPS_SSH_OPTS (e.g. "-p 2222 -i ~/.ssh/vps") is passed to ssh/rsync.
 
@@ -19,7 +23,7 @@ VPS_SECRETS_DIR ?= deploy/vps/secrets
 VPS_SECRETS_ARGS ?=
 VPS_DEPLOY_USER ?= root
 VPS_REMOTE_DIR  ?= /srv/sensor-upload
-VPS_DEVICE      ?=
+VPS_DEVICE      ?= $(DEVICE)
 VPS_QUIC_SYSCTL ?= 1
 VPS_SSH_PORT    ?= 22
 VPS_SSH_OPTS    ?=
@@ -28,12 +32,13 @@ VPS_DEPLOY = VPS='$(VPS)' VPS_IP='$(VPS_IP)' VPS_ARCH='$(VPS_ARCH)' \
 	SECRETS_DIR='$(abspath $(VPS_SECRETS_DIR))' REMOTE_DIR='$(VPS_REMOTE_DIR)' \
 	SSH_OPTS='$(VPS_SSH_OPTS)' GO='$(GO)' deploy/vps/deploy.sh
 
-.PHONY: vps-secrets vps-bootstrap vps-deploy vps-status vps-logs vps-down vps-wipe vps-device-key vps-device-delete vps-device-list vps-tunnel
+.PHONY: vps-secrets vps-bootstrap vps-deploy vps-status vps-logs vps-down vps-wipe vps-tunnel \
+	vps-device-batch vps-device-approve vps-device-reject vps-device-revoke vps-device-issue vps-device-token vps-device-list
 
 vps-require-%:
 	@test -n '$($*)' || { echo "set $*=... (see mk/vps.mk)" >&2; exit 2; }
 
-## vps-secrets: CA + server cert (SAN = VPS_IP), .env (operator machine).
+## vps-secrets: CA + server cert (SAN = VPS_IP), JWT signing key, .env (operator machine).
 vps-secrets: vps-require-VPS_IP
 	deploy/vps/gen-secrets.sh --ip '$(VPS_IP)' $(if $(VPS_SAN),--san '$(VPS_SAN)') \
 		--out '$(VPS_SECRETS_DIR)' $(VPS_SECRETS_ARGS)
@@ -60,19 +65,34 @@ vps-down: vps-require-VPS
 vps-wipe: vps-require-VPS
 	@$(VPS_DEPLOY) wipe
 
-## vps-device-key: create/replace VPS_DEVICE's key in the VPS database (ssh +
-## docker compose exec server /devicekey set); the bearer token goes to stdout,
-## shown only once. The previous key of that device stops working at once.
-vps-device-key: vps-require-VPS vps-require-VPS_DEVICE
-	@DEVICE_CMD=set DEVICE='$(VPS_DEVICE)' $(VPS_DEPLOY) device-key
+# Device admin on the VPS: ssh + docker compose exec server /devicectl.
+VPS_DEVICECTL = DEVICE='$(VPS_DEVICE)' TTL='$(TTL)' STATUS='$(STATUS)' $(VPS_DEPLOY) device
 
-## vps-device-delete: delete VPS_DEVICE's key (its requests get 401).
-vps-device-delete: vps-require-VPS vps-require-VPS_DEVICE
-	@DEVICE_CMD=delete DEVICE='$(VPS_DEVICE)' $(VPS_DEPLOY) device-key
+## vps-device-batch: register VPS_DEVICE (batch import, active).
+vps-device-batch: vps-require-VPS vps-require-VPS_DEVICE
+	@DEVICE_CMD=batch-import $(VPS_DEVICECTL)
 
-## vps-device-list: devices with a key and when it was set (never the keys).
+## vps-device-approve / -reject / -revoke: change VPS_DEVICE's status.
+vps-device-approve: vps-require-VPS vps-require-VPS_DEVICE
+	@DEVICE_CMD=approve $(VPS_DEVICECTL)
+
+vps-device-reject: vps-require-VPS vps-require-VPS_DEVICE
+	@DEVICE_CMD=reject $(VPS_DEVICECTL)
+
+vps-device-revoke: vps-require-VPS vps-require-VPS_DEVICE
+	@DEVICE_CMD=revoke $(VPS_DEVICECTL)
+
+## vps-device-issue: print a new token pair JSON for VPS_DEVICE (stdout).
+vps-device-issue: vps-require-VPS vps-require-VPS_DEVICE
+	@DEVICE_CMD=issue $(VPS_DEVICECTL)
+
+## vps-device-token: print only an access JWT for VPS_DEVICE (stdout; TTL default: ACCESS_TOKEN_TTL).
+vps-device-token: vps-require-VPS vps-require-VPS_DEVICE
+	@DEVICE_CMD=access-token $(VPS_DEVICECTL)
+
+## vps-device-list: devices and their status ([STATUS=pending|active|rejected|revoked]).
 vps-device-list: vps-require-VPS
-	@DEVICE_CMD=list $(VPS_DEPLOY) device-key
+	@DEVICE_CMD=list $(VPS_DEVICECTL)
 
 ## vps-tunnel: forward the loopback-only admin (9100) and MinIO console (9001) ports.
 vps-tunnel: vps-require-VPS

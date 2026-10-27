@@ -21,6 +21,30 @@ const (
 	LookupError    = "error"
 )
 
+// Results for Metrics.DeviceRegister (POST /v1/devices/register).
+const (
+	RegisterPending        = "pending"         // new or still pending: 202
+	RegisterReregistered   = "reregistered"    // active with expired family, back to pending: 202
+	RegisterIssued         = "issued"          // active: 200 token pair
+	RegisterNotAllowed     = "not_allowed"     // not in device_batch: 403
+	RegisterNotActive      = "not_active"      // rejected or revoked: 403
+	RegisterSecretMismatch = "secret_mismatch" // 409
+	RegisterInvalid        = "invalid"         // 400
+	RegisterRateLimited    = "rate_limited"    // 429
+	RegisterError          = "error"           // 503
+)
+
+// Results for Metrics.TokenRefresh (POST /v1/devices/token/refresh).
+const (
+	RefreshOK           = "ok"
+	RefreshInvalid      = "invalid"       // malformed request: 400
+	RefreshInvalidGrant = "invalid_grant" // unknown or superseded-by-reset token: 401
+	RefreshReuse        = "reuse"         // rotated-out token presented again: 401
+	RefreshExpired      = "expired"       // idle or max age exceeded: 401
+	RefreshNotActive    = "not_active"    // 403
+	RefreshError        = "error"         // 503
+)
+
 // Reasons for Metrics.RetentionDeleted.
 const (
 	RetentionAge  = "age"  // completed longer than RETENTION_MAX_AGE ago
@@ -49,6 +73,12 @@ type Metrics struct {
 	// RetentionDeleted counts completed uploads (object and row) deleted
 	// by retention, labelled by reason (RetentionAge, RetentionDisk).
 	RetentionDeleted *prometheus.CounterVec
+	// DeviceRegister counts device registration requests, by result
+	// (Register* constants).
+	DeviceRegister *prometheus.CounterVec
+	// TokenRefresh counts refresh token requests, by result (Refresh*
+	// constants); result "reuse" is a security event.
+	TokenRefresh *prometheus.CounterVec
 	// DiskUsedRatio is the used fraction (0..1) of DISK_PATH's
 	// filesystem at the last disk check.
 	DiskUsedRatio prometheus.Gauge
@@ -104,6 +134,12 @@ func NewMetrics(reg prometheus.Registerer) (*Metrics, error) {
 		RetentionDeleted: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "uploads_retention_deleted_total", Help: "Completed uploads deleted by retention (object and row), by reason (age, disk).",
 		}, []string{"reason"}),
+		DeviceRegister: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "device_register_total", Help: "Device registration requests, by result.",
+		}, []string{"result"}),
+		TokenRefresh: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "token_refresh_total", Help: "Refresh token requests, by result (reuse = rotated-out token presented again).",
+		}, []string{"result"}),
 		DiskUsedRatio: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "disk_used_ratio", Help: "Used fraction of the DISK_PATH filesystem (as df: used / (used + available)) at the last check.",
 		}),
@@ -111,7 +147,7 @@ func NewMetrics(reg prometheus.Registerer) (*Metrics, error) {
 	for _, c := range []prometheus.Collector{
 		m.Started, m.Completed, m.Failed, m.Resumes, m.BytesReceived,
 		m.ChunkBytes, m.Duration, m.FinalizeDuration, m.InProgress, m.GRPCStreamResets,
-		m.StagingOrphans, m.FileLookups, m.RetentionDeleted, m.DiskUsedRatio,
+		m.StagingOrphans, m.FileLookups, m.RetentionDeleted, m.DeviceRegister, m.TokenRefresh, m.DiskUsedRatio,
 	} {
 		if err := reg.Register(c); err != nil {
 			return nil, err
