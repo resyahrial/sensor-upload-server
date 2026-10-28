@@ -614,6 +614,26 @@ the MinIO data directory (`/srv/sensor-upload/minio`, mounted read-only into
 the server), so the watermarks follow the filesystem that holds the stored
 objects.
 
+### Deploying from the VPS itself
+
+If you would rather build on the server than on your machine, clone the
+repo there and run one script as root. It bootstraps the host on the first
+run, generates secrets for the public IP, builds the image with the root
+Dockerfile (needs ~2 GB free RAM), installs everything into
+`/srv/sensor-upload`, starts the stack and waits for `/readyz`:
+
+```sh
+git clone https://github.com/resyahrial/sensor-upload-server.git
+cd sensor-upload-server && sudo deploy/vps/server-deploy.sh
+# later: git pull && sudo deploy/vps/server-deploy.sh
+```
+
+Knobs: `PUBLIC_IP` (default: detected), `PUBLIC_PORT` (9000), `SSH_PORT`
+(22, allowed in ufw), `UFW=0` to leave the firewall alone, `SAN=DNS:...`.
+Clients need `deploy/vps/secrets/ca.crt` from the server (`ca.key` also
+lives there, so keep the checkout private). Device admin:
+`cd /srv/sensor-upload && sudo docker compose exec server /devicectl ...`.
+
 ### Connecting clients
 
 Clients trust `deploy/vps/secrets/ca.crt` (the CA, not the server
