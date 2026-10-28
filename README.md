@@ -551,11 +551,11 @@ so `df`/`du` on the host show it.
 
 | Port | Exposure | What |
 |---|---|---|
-| 443/tcp + 443/udp | public | TLS: `/rest/files/`, `/grpc/...` (TCP) and `/rest-http3/files/` (QUIC) |
-| 9090/tcp | public | native gRPC (TLS) |
+| 9000/tcp + 9000/udp | public | TLS: `/rest/files/`, `/grpc/...` (TCP) and `/rest-http3/files/` (QUIC) |
+| 9090/tcp | `127.0.0.1` | native gRPC (TLS); `GRPC_BIND=0.0.0.0` in `.env` to publish it |
 | 9100/tcp | `127.0.0.1` | admin: `/metrics`, `/healthz`, `/readyz` (plain HTTP) |
 | 9001/tcp | `127.0.0.1` | MinIO console |
-| Postgres 5432, MinIO S3 9000 | not published | compose network only |
+| Postgres 5432, MinIO S3 9000 | not published | compose network only (MinIO's 9000 is container-internal, no clash) |
 
 ### Prerequisites
 
@@ -576,7 +576,7 @@ VPS_IP=203.0.113.10                      # your VPS public IP
 make vps-secrets VPS_IP=$VPS_IP
 
 # 2. One-time VPS setup as root: Docker Engine + compose plugin (Docker's apt repo),
-#    /srv/sensor-upload dirs, ufw (22/tcp, 443/tcp, 443/udp, 9090/tcp), QUIC UDP
+#    /srv/sensor-upload dirs, ufw (22/tcp, 9000/tcp, 9000/udp), QUIC UDP
 #    buffer sysctls (rmem_max/wmem_max = 7500000, /etc/sysctl.d). Safe to re-run.
 make vps-bootstrap VPS=root@$VPS_IP      # VPS_DEPLOY_USER=ubuntu to deploy as a docker-group user
 
@@ -601,7 +601,9 @@ make vps-wipe   VPS=root@$VPS_IP         # stop and delete all data (asks you to
 ```
 
 `VPS_SSH_OPTS="-p 2222 -i ~/.ssh/vps"` is passed to ssh and rsync, and
-`VPS_SSH_PORT` sets the port ufw allows. If `VPS` is an ssh alias, also set
+`VPS_SSH_PORT` sets the SSH port ufw allows. The public port is
+`HTTPS_PORT` in `deploy/vps/secrets/.env` (default 9000); if you change it,
+pass the same value as `VPS_PUBLIC_PORT` to `make vps-bootstrap`. If `VPS` is an ssh alias, also set
 `VPS_IP`. Tuning (`LOG_LEVEL`, `MAX_FILE_BYTES`, `INCOMPLETE_TTL`,
 `CLEANUP_INTERVAL`, retention and disk watermarks) is in
 `deploy/vps/secrets/.env`. Edit it and run `make vps-deploy` again.
@@ -623,22 +625,21 @@ TOKEN=$(make -s vps-device-token VPS=root@$VPS_IP VPS_DEVICE=dev-1)   # access J
 CA=deploy/vps/secrets/ca.crt
 # or, refreshed automatically: make -s vps-device-issue ... > dev-1.json; bin/uploader -refresh-token-file dev-1.json ...
 
-bin/uploader -protocol rest        -url https://$VPS_IP -token "$TOKEN" -device dev-1 -ca $CA -file a.flac -state rest.db
-bin/uploader -protocol rest-http3  -url https://$VPS_IP -token "$TOKEN" -device dev-1 -ca $CA -file b.flac -state h3.db
-bin/uploader -protocol grpc        -url https://$VPS_IP -token "$TOKEN" -device dev-1 -ca $CA -file c.flac -state grpc.db
-bin/uploader -protocol grpc-native -url $VPS_IP:9090    -token "$TOKEN" -device dev-1 -ca $CA -file d.flac -state native.db
-curl -s -o /dev/null -w '%{http_code}\n' --cacert $CA https://$VPS_IP/rest/files/   # 401 = TLS ok, token required
+bin/uploader -protocol rest        -url https://$VPS_IP:9000 -token "$TOKEN" -device dev-1 -ca $CA -file a.flac -state rest.db
+bin/uploader -protocol rest-http3  -url https://$VPS_IP:9000 -token "$TOKEN" -device dev-1 -ca $CA -file b.flac -state h3.db
+bin/uploader -protocol grpc        -url https://$VPS_IP:9000 -token "$TOKEN" -device dev-1 -ca $CA -file c.flac -state grpc.db
+curl -s -o /dev/null -w '%{http_code}\n' --cacert $CA https://$VPS_IP:9000/rest/files/   # 401 = TLS ok, token required
 ```
 
 | Protocol | URL |
 |---|---|
-| tus over HTTP/1.1–2 | `https://<ip>/rest/files/` |
-| tus over HTTP/3 (UDP 443) | `https://<ip>/rest-http3/files/` |
-| gRPC, `/grpc` prefix | `<ip>:443` (method path `/grpc/upload.v1.UploadService/...`) |
-| gRPC, native | `<ip>:9090` (bare or `/grpc` paths) |
+| tus over HTTP/1.1–2 | `https://<ip>:9000/rest/files/` |
+| tus over HTTP/3 (UDP 9000) | `https://<ip>:9000/rest-http3/files/` |
+| gRPC, `/grpc` prefix | `<ip>:9000` (method path `/grpc/upload.v1.UploadService/...`) |
+| gRPC, native | `<ip>:9090`, loopback only unless `GRPC_BIND=0.0.0.0` |
 
-Because the container listens on 443 itself, `Alt-Svc` advertises
-`h3=":443"` (contract deviation 10 does not apply here).
+Because the container listens on 9000 itself, `Alt-Svc` advertises
+`h3=":9000"` (contract deviation 10 does not apply here).
 
 ### Experiment and remote e2e against the VPS
 
@@ -648,14 +649,16 @@ runtime's default network. Shaping is added on top of the real path to the VPS:
 
 ```sh
 TOKEN=$(make -s vps-device-token VPS=root@$VPS_IP VPS_DEVICE=netem-0001 TTL=72h)
-make experiment-smoke SERVER_URL=https://$VPS_IP GRPC_NATIVE_URL=$VPS_IP:9090 \
+# Native gRPC (9090) is not public, so leave it out of the protocol list.
+make experiment-smoke SERVER_URL=https://$VPS_IP:9000 PROTOCOLS='rest rest-http3 grpc' \
   TOKEN="$TOKEN" CA_FILE=deploy/vps/secrets/ca.crt NETEM_NETWORK=podman   # docker: bridge
 ```
 
 Remote end-to-end suite (`make e2e-remote`):
 
 ```sh
-make e2e-remote REMOTE_URL=https://$VPS_IP REMOTE_GRPC_NATIVE=$VPS_IP:9090 \
+# REMOTE_GRPC_NATIVE is left unset (9090 is not public), so the native gRPC tests skip.
+make e2e-remote REMOTE_URL=https://$VPS_IP:9000 \
   REMOTE_TOKEN="$(make -s vps-device-token VPS=root@$VPS_IP VPS_DEVICE=e2e-remote TTL=24h)" \
   REMOTE_OTHER_TOKEN="$(make -s vps-device-token VPS=root@$VPS_IP VPS_DEVICE=e2e-remote-2 TTL=24h)" \
   REMOTE_CA_FILE=deploy/vps/secrets/ca.crt

@@ -26,6 +26,7 @@ VPS_REMOTE_DIR  ?= /srv/sensor-upload
 VPS_DEVICE      ?= $(DEVICE)
 VPS_QUIC_SYSCTL ?= 1
 VPS_SSH_PORT    ?= 22
+VPS_PUBLIC_PORT ?= 9000
 VPS_SSH_OPTS    ?=
 
 VPS_DEPLOY = VPS='$(VPS)' VPS_IP='$(VPS_IP)' VPS_ARCH='$(VPS_ARCH)' \
@@ -43,10 +44,10 @@ vps-secrets: vps-require-VPS_IP
 	deploy/vps/gen-secrets.sh --ip '$(VPS_IP)' $(if $(VPS_SAN),--san '$(VPS_SAN)') \
 		--out '$(VPS_SECRETS_DIR)' $(VPS_SECRETS_ARGS)
 
-## vps-bootstrap: one-time VPS setup as root (Docker, /srv/sensor-upload, ufw, QUIC sysctls).
+## vps-bootstrap: one-time VPS setup as root (Docker, /srv/sensor-upload, ufw on VPS_PUBLIC_PORT, QUIC sysctls).
 vps-bootstrap: vps-require-VPS
 	ssh $(VPS_SSH_OPTS) '$(VPS)' "DEPLOY_USER='$(VPS_DEPLOY_USER)' DATA_DIR='$(VPS_REMOTE_DIR)' \
-		SSH_PORT='$(VPS_SSH_PORT)' QUIC_SYSCTL='$(VPS_QUIC_SYSCTL)' bash -s" < deploy/vps/bootstrap.sh
+		SSH_PORT='$(VPS_SSH_PORT)' PUBLIC_PORT='$(VPS_PUBLIC_PORT)' QUIC_SYSCTL='$(VPS_QUIC_SYSCTL)' bash -s" < deploy/vps/bootstrap.sh
 
 ## vps-deploy: build linux/$(VPS_ARCH) image locally, copy it + compose + certs + .env, up -d, wait for /readyz.
 vps-deploy: vps-require-VPS

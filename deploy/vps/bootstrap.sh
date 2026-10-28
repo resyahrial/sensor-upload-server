@@ -9,7 +9,7 @@
 #      plus curl, rsync and ufw
 #   2. creates DATA_DIR (/srv/sensor-upload) with pgdata/ minio/ staging/ certs/
 #      owned by the users the containers run as
-#   3. ufw: allow SSH_PORT/tcp, 443/tcp, 443/udp, 9090/tcp; deny other inbound; enable
+#   3. ufw: allow SSH_PORT/tcp, PUBLIC_PORT/tcp+udp; deny other inbound; enable
 #   4. raises the UDP socket buffer limits for QUIC (quic-go recommends
 #      7500000 bytes), persisted in /etc/sysctl.d
 #
@@ -18,6 +18,7 @@
 #                 docker group, owns DATA_DIR); default root
 #   DATA_DIR      default /srv/sensor-upload
 #   SSH_PORT      default 22
+#   PUBLIC_PORT   default 9000 (HTTPS_PORT in .env)
 #   QUIC_SYSCTL   1 (default) to set net.core.rmem_max/wmem_max, 0 to skip
 #   UFW           1 (default) to configure and enable ufw, 0 to skip
 set -euo pipefail
@@ -25,6 +26,7 @@ set -euo pipefail
 DEPLOY_USER=${DEPLOY_USER:-root}
 DATA_DIR=${DATA_DIR:-/srv/sensor-upload}
 SSH_PORT=${SSH_PORT:-22}
+PUBLIC_PORT=${PUBLIC_PORT:-9000}
 QUIC_SYSCTL=${QUIC_SYSCTL:-1}
 UFW=${UFW:-1}
 
@@ -110,17 +112,16 @@ EOF
 fi
 
 if [[ $UFW == 1 ]]; then
-	log "configuring ufw (ssh $SSH_PORT/tcp, 443/tcp, 443/udp, 9090/tcp)"
+	log "configuring ufw (ssh $SSH_PORT/tcp, $PUBLIC_PORT/tcp, $PUBLIC_PORT/udp)"
 	ufw default deny incoming >/dev/null
 	ufw default allow outgoing >/dev/null
 	ufw allow "$SSH_PORT/tcp" comment ssh >/dev/null
-	ufw allow 443/tcp comment 'sensor-upload https' >/dev/null
-	ufw allow 443/udp comment 'sensor-upload http3' >/dev/null
-	ufw allow 9090/tcp comment 'sensor-upload grpc' >/dev/null
+	ufw allow "$PUBLIC_PORT/tcp" comment 'sensor-upload https' >/dev/null
+	ufw allow "$PUBLIC_PORT/udp" comment 'sensor-upload http3' >/dev/null
 	ufw --force enable >/dev/null
 	ufw status verbose
 	# Note: Docker writes its own iptables rules for published ports, which
-	# bypass ufw. docker-compose.yml therefore publishes only 443 and 9090
+	# bypass ufw. docker-compose.yml therefore publishes only PUBLIC_PORT
 	# publicly and binds everything else to 127.0.0.1.
 fi
 

@@ -9,5 +9,5 @@ COPY devicectl /devicectl
 # Pre-create /data owned by the nonroot user so named volumes inherit it.
 COPY --chown=65532:65532 data /data
 USER nonroot:nonroot
-EXPOSE 443/tcp 443/udp 9090/tcp 9100/tcp
+EXPOSE 9000/tcp 9000/udp 9090/tcp 9100/tcp
 ENTRYPOINT ["/server"]

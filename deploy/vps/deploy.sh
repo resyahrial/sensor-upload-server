@@ -139,13 +139,15 @@ wait_ready() {
 		remote "docker compose ps; docker compose logs --tail=50 server" || true
 		die "server not ready after ${READY_TIMEOUT}s"
 	fi
-	local code
+	local code port url
+	port=$(sed -n 's/^HTTPS_PORT=//p' "$SECRETS_DIR/.env")
+	url="https://$vps_host:${port:-9000}"
 	code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 --cacert "$SECRETS_DIR/ca.crt" \
-		"https://$vps_host/rest/files/" || true)
+		"$url/rest/files/" || true)
 	if [[ $code == 000 ]]; then
-		log "WARNING: https://$vps_host/ not reachable from here with ca.crt (firewall? SAN?)"
+		log "WARNING: $url/ not reachable from here with ca.crt (firewall? SAN?)"
 	else
-		log "https://$vps_host/rest/files/ answers HTTP $code through TLS (401 without a token is expected)"
+		log "$url/rest/files/ answers HTTP $code through TLS (401 without a token is expected)"
 	fi
 }
 
