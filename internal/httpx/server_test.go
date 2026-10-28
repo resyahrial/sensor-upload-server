@@ -95,6 +95,51 @@ func TestTLSServerServesHTTP1AndHTTP2(t *testing.T) {
 	}
 }
 
+func TestPlainServerServesH2CWhenEnabled(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		h2c     bool
+		wantH2C bool
+	}{
+		{"enabled", true, true},
+		{"disabled", false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, err := Listen(ServerConfig{
+				Name: "public", Addr: "127.0.0.1:0", UnencryptedHTTP2: tc.h2c,
+				Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					_, _ = io.WriteString(w, r.Proto)
+				}),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			go func() { _ = srv.Serve() }()
+			t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
+			url := "http://" + srv.Addr().String() + "/"
+
+			p := new(http.Protocols)
+			p.SetUnencryptedHTTP2(true)
+			c := &http.Client{Transport: &http.Transport{Protocols: p}}
+			res, err := c.Get(url)
+			if !tc.wantH2C {
+				if err == nil {
+					res.Body.Close()
+					t.Error("h2c request should fail when UnencryptedHTTP2 is off")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer res.Body.Close()
+			if body, _ := io.ReadAll(res.Body); string(body) != "HTTP/2.0" {
+				t.Errorf("proto = %q, want HTTP/2.0", body)
+			}
+		})
+	}
+}
+
 func TestListenFailsOnBusyPort(t *testing.T) {
 	a, err := Listen(ServerConfig{Name: "a", Addr: "127.0.0.1:0", Handler: http.NotFoundHandler()})
 	if err != nil {

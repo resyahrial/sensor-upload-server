@@ -83,9 +83,14 @@ type App struct {
 // gives one random port for both. Call Run to serve.
 func New(ctx context.Context, opts Options) (_ *App, err error) {
 	cfg, log := opts.Config, opts.Log
-	cert, err := tls.LoadX509KeyPair(cfg.TLSCertFile, cfg.TLSKeyFile)
-	if err != nil {
-		return nil, fmt.Errorf("load TLS key pair: %w", err)
+	// nil behind a TLS-terminating proxy (BEHIND_PROXY): plain HTTP, no HTTP/3.
+	var tlsCfg *tls.Config
+	if !cfg.BehindProxy {
+		cert, err := tls.LoadX509KeyPair(cfg.TLSCertFile, cfg.TLSKeyFile)
+		if err != nil {
+			return nil, fmt.Errorf("load TLS key pair: %w", err)
+		}
+		tlsCfg = &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}
 	}
 	if err := os.MkdirAll(cfg.StagingDir, 0o750); err != nil {
 		return nil, fmt.Errorf("create staging dir: %w", err)
@@ -144,6 +149,7 @@ func New(ctx context.Context, opts Options) (_ *App, err error) {
 	tusCfg := func(base, protocol string) tusapi.Config {
 		return tusapi.Config{
 			BasePath:      base,
+			BehindProxy:   cfg.BehindProxy,
 			Protocol:      protocol,
 			Rules:         rules,
 			IncompleteTTL: cfg.IncompleteTTL,
@@ -164,7 +170,6 @@ func New(ctx context.Context, opts Options) (_ *App, err error) {
 		return nil, err
 	}
 
-	tlsCfg := &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}
 	if err := a.newGRPC(cfg, tlsCfg, rules, repo, fin, verifier, metrics); err != nil {
 		return nil, err
 	}
@@ -184,13 +189,14 @@ func New(ctx context.Context, opts Options) (_ *App, err error) {
 	files := fileapi.NewHandler(fileapi.Config{Repo: repo, Metrics: metrics, Log: log})
 	// Device registration and token refresh (unauthenticated JSON).
 	devices, err := deviceapi.NewHandler(deviceapi.Config{
-		Store:      db.NewDevices(pool),
-		Issuer:     issuer,
-		IdleTTL:    cfg.RefreshIdleTTL,
-		MaxAge:     cfg.RefreshMaxAge,
-		RetryAfter: cfg.RegisterRetryAfter,
-		Metrics:    metrics,
-		Log:        log,
+		Store:       db.NewDevices(pool),
+		Issuer:      issuer,
+		IdleTTL:     cfg.RefreshIdleTTL,
+		MaxAge:      cfg.RefreshMaxAge,
+		RetryAfter:  cfg.RegisterRetryAfter,
+		BehindProxy: cfg.BehindProxy,
+		Metrics:     metrics,
+		Log:         log,
 	})
 	if err != nil {
 		return nil, err
@@ -208,40 +214,26 @@ func New(ctx context.Context, opts Options) (_ *App, err error) {
 	// real port), so the server dispatches through this indirection.
 	var public http.Handler = http.NotFoundHandler()
 	a.public, err = httpx.Listen(httpx.ServerConfig{
-		Name:          "public",
-		Addr:          cfg.ListenAddr,
-		Handler:       http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { public.ServeHTTP(w, r) }),
-		TLS:           tlsCfg,
-		ShutdownCause: handler.ErrServerShutdown,
+		Name:    "public",
+		Addr:    cfg.ListenAddr,
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { public.ServeHTTP(w, r) }),
+		TLS:     tlsCfg,
+		// gRPC from the proxy arrives as h2c.
+		UnencryptedHTTP2: cfg.BehindProxy,
+		ShutdownCause:    handler.ErrServerShutdown,
 	})
 	if err != nil {
 		return nil, err
 	}
 	a.bound = append(a.bound, a.public)
-	port := strconv.Itoa(a.public.Addr().(*net.TCPAddr).Port)
-	routes.AltSvc = httpx.AltSvcH3(port)
+	if tlsCfg != nil {
+		port := strconv.Itoa(a.public.Addr().(*net.TCPAddr).Port)
+		if err := a.listenH3(cfg, tlsCfg, port, h3Tus, files); err != nil {
+			return nil, err
+		}
+		routes.AltSvc = httpx.AltSvcH3(port)
+	}
 	public = httpx.NewRouter(routes)
-
-	h3mux := http.NewServeMux()
-	h3mux.Handle(tusapi.BasePathRESTHTTP3, h3Tus)
-	h3mux.Handle(httpx.PrefixFiles, files)
-	host, _, err := net.SplitHostPort(cfg.ListenAddr)
-	if err != nil {
-		return nil, fmt.Errorf("LISTEN_ADDR: %w", err)
-	}
-	a.h3, err = httpx.ListenH3(httpx.H3Config{
-		Name:            "public-h3",
-		Addr:            net.JoinHostPort(host, port),
-		Handler:         h3mux,
-		TLS:             tlsCfg,
-		MaxIdleTimeout:  cfg.QUICIdleTimeout,
-		KeepAlivePeriod: cfg.QUICKeepAlive,
-		ShutdownCause:   handler.ErrServerShutdown,
-	})
-	if err != nil {
-		return nil, err
-	}
-	a.bound = append(a.bound, a.h3)
 
 	if cfg.GRPCNativeAddr != "" {
 		if a.native, err = listenNativeGRPC(cfg.GRPCNativeAddr, a.grpcSrv); err != nil {
@@ -264,6 +256,31 @@ func New(ctx context.Context, opts Options) (_ *App, err error) {
 		return nil, err
 	}
 	return a, nil
+}
+
+// listenH3 binds the HTTP/3 listener on the public TCP listener's port.
+func (a *App) listenH3(cfg config.Config, tlsCfg *tls.Config, port string, h3Tus, files http.Handler) error {
+	h3mux := http.NewServeMux()
+	h3mux.Handle(tusapi.BasePathRESTHTTP3, h3Tus)
+	h3mux.Handle(httpx.PrefixFiles, files)
+	host, _, err := net.SplitHostPort(cfg.ListenAddr)
+	if err != nil {
+		return fmt.Errorf("LISTEN_ADDR: %w", err)
+	}
+	a.h3, err = httpx.ListenH3(httpx.H3Config{
+		Name:            "public-h3",
+		Addr:            net.JoinHostPort(host, port),
+		Handler:         h3mux,
+		TLS:             tlsCfg,
+		MaxIdleTimeout:  cfg.QUICIdleTimeout,
+		KeepAlivePeriod: cfg.QUICKeepAlive,
+		ShutdownCause:   handler.ErrServerShutdown,
+	})
+	if err != nil {
+		return err
+	}
+	a.bound = append(a.bound, a.h3)
+	return nil
 }
 
 // Addr returns the public TCP address (the UDP port is the same).
@@ -299,12 +316,16 @@ func (a *App) AdminAddr() net.Addr { return a.admin.Addr() }
 // then the cleaner and retention are stopped and the database pool closed.
 func (a *App) Run(ctx context.Context) error {
 	defer a.pool.Close()
-	nativeAddr := ""
+	nativeAddr, h3Addr := "", ""
 	if a.native != nil {
 		nativeAddr = a.native.Addr().String()
 	}
-	a.log.Info("server started", "listen_addr", a.public.Addr().String(), "h3_addr", a.h3.Addr().String(),
-		"grpc_native_addr", nativeAddr, "metrics_addr", a.admin.Addr().String())
+	if a.h3 != nil {
+		h3Addr = a.h3.Addr().String()
+	}
+	a.log.Info("server started", "listen_addr", a.public.Addr().String(), "h3_addr", h3Addr,
+		"grpc_native_addr", nativeAddr, "metrics_addr", a.admin.Addr().String(),
+		"behind_proxy", a.cfg.BehindProxy)
 
 	cleanCtx, stopClean := context.WithCancel(context.WithoutCancel(ctx))
 	cleanDone, retDone := make(chan struct{}), make(chan struct{})
@@ -332,7 +353,10 @@ func (a *App) Run(ctx context.Context) error {
 	if a.native != nil {
 		svcs = append(svcs, a.native)
 	}
-	svcs = append(svcs, a.h3, a.admin)
+	if a.h3 != nil {
+		svcs = append(svcs, a.h3)
+	}
+	svcs = append(svcs, a.admin)
 	err := httpx.Run(ctx, a.log, a.cfg.ShutdownTimeout, svcs...)
 	// Nothing is served any more; close whatever ServeHTTP left behind.
 	a.grpcSrv.Stop()
@@ -391,8 +415,13 @@ func (a *App) newGRPC(cfg config.Config, tlsCfg *tls.Config, rules meta.Rules, r
 		return err
 	}
 	// The credentials apply to the native listener (grpc.Server.Serve) only;
-	// ServeHTTP on the TLS TCP listener ignores them.
-	if a.grpcSrv, err = grpcapi.NewServer(a.grpcSvc, grpc.Creds(credentials.NewTLS(tlsCfg))); err != nil {
+	// ServeHTTP on the public TCP listener ignores them. Behind a proxy
+	// (tlsCfg nil) the native listener is plaintext too.
+	var opts []grpc.ServerOption
+	if tlsCfg != nil {
+		opts = append(opts, grpc.Creds(credentials.NewTLS(tlsCfg)))
+	}
+	if a.grpcSrv, err = grpcapi.NewServer(a.grpcSvc, opts...); err != nil {
 		return err
 	}
 	tus := a.TusCleanup()

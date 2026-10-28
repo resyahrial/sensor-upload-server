@@ -80,7 +80,10 @@ type Verifier interface {
 
 // Config configures one tus endpoint.
 type Config struct {
-	BasePath      string // BasePathREST or BasePathRESTHTTP3
+	BasePath string // BasePathREST or BasePathRESTHTTP3
+	// BehindProxy builds Location URLs from X-Forwarded-Proto/-Host (set
+	// by a TLS-terminating reverse proxy) instead of the request itself.
+	BehindProxy   bool
 	Protocol      string // ProtocolREST or ProtocolRESTHTTP3
 	Rules         meta.Rules
 	IncompleteTTL time.Duration // drives Upload-Expires
@@ -107,6 +110,7 @@ func New(cfg Config) (http.Handler, error) {
 	tusd, err := handler.NewHandler(handler.Config{
 		StoreComposer:              cfg.Staging.composer(),
 		BasePath:                   cfg.BasePath,
+		RespectForwardedHeaders:    cfg.BehindProxy,
 		MaxSize:                    cfg.Rules.MaxFileBytes,
 		DisableDownload:            true,
 		DisableConcatenation:       true,

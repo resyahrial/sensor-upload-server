@@ -45,6 +45,11 @@ type Config struct {
 
 	TLSCertFile string
 	TLSKeyFile  string
+	// BehindProxy (BEHIND_PROXY) serves the public listener as plain HTTP
+	// (HTTP/1.1 and h2c) for a TLS-terminating reverse proxy: no TLS key
+	// pair, no HTTP/3 listener or Alt-Svc, and X-Forwarded-* headers are
+	// trusted (tus Location URLs, register rate limit per client IP).
+	BehindProxy bool
 
 	DatabaseURL string
 
@@ -113,6 +118,7 @@ func Load(lookup LookupFunc) (Config, error) {
 		MetricsAddr:        p.str("METRICS_ADDR", ":9100"),
 		TLSCertFile:        p.str("TLS_CERT_FILE", ""),
 		TLSKeyFile:         p.str("TLS_KEY_FILE", ""),
+		BehindProxy:        p.boolean("BEHIND_PROXY", false),
 		DatabaseURL:        p.str("DATABASE_URL", ""),
 		JWTSigningKeyFile:  p.str("JWT_SIGNING_KEY_FILE", ""),
 		JWTVerifyKeysDir:   p.str("JWT_VERIFY_KEYS_DIR", ""),
@@ -167,12 +173,15 @@ func (c Config) validate() []error {
 	fail := func(format string, args ...any) { errs = append(errs, fmt.Errorf(format, args...)) }
 
 	required := []struct{ name, val string }{
-		{"TLS_CERT_FILE", c.TLSCertFile},
-		{"TLS_KEY_FILE", c.TLSKeyFile},
 		{"DATABASE_URL", c.DatabaseURL},
 		{"JWT_SIGNING_KEY_FILE", c.JWTSigningKeyFile},
 		{"JWT_ISSUER", c.JWTIssuer},
 		{"STAGING_DIR", c.StagingDir},
+	}
+	if !c.BehindProxy {
+		required = append(required,
+			struct{ name, val string }{"TLS_CERT_FILE", c.TLSCertFile},
+			struct{ name, val string }{"TLS_KEY_FILE", c.TLSKeyFile})
 	}
 	for _, r := range required {
 		if r.val == "" {

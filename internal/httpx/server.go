@@ -52,6 +52,9 @@ type ServerConfig struct {
 	// TLS enables HTTPS (HTTP/1.1 and HTTP/2) when non-nil. The config is
 	// cloned and forced to TLS 1.2 or newer.
 	TLS *tls.Config
+	// UnencryptedHTTP2 also accepts HTTP/2 with prior knowledge (h2c) when
+	// TLS is nil, e.g. gRPC from a TLS-terminating reverse proxy.
+	UnencryptedHTTP2 bool
 	// ShutdownCause is set as the cancellation cause of every request
 	// context when Shutdown starts (tusd needs handler.ErrServerShutdown
 	// here to answer 503). Defaults to ErrShuttingDown.
@@ -76,6 +79,7 @@ func Listen(cfg ServerConfig) (*HTTPServer, error) {
 
 	protocols := new(http.Protocols)
 	protocols.SetHTTP1(true)
+	protocols.SetUnencryptedHTTP2(cfg.TLS == nil && cfg.UnencryptedHTTP2)
 	srv := &http.Server{
 		Handler:           cfg.Handler,
 		ReadHeaderTimeout: ReadHeaderTimeout,

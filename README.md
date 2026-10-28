@@ -327,7 +327,8 @@ All problems are reported together and the server exits 1.
 | `LISTEN_ADDR` | `:8443` | TLS TCP (HTTP/1.1, HTTP/2, `/grpc`) and QUIC UDP on the same port |
 | `GRPC_NATIVE_ADDR` | *(empty = off)* | Native gRPC listener (TLS); serves bare and `/grpc`-prefixed paths |
 | `METRICS_ADDR` | `:9100` | Plain-HTTP admin: `/metrics`, `/healthz`, `/readyz`. Unauthenticated and on all interfaces by default: firewall it or set e.g. `127.0.0.1:9100`. `/readyz` reports only `ok`/`fail` per check (`postgres`, `staging`, `objstore`); the error behind a failure is logged at `warn` (`readiness check failed`) |
-| `TLS_CERT_FILE`, `TLS_KEY_FILE` | — | Required. TLS 1.2+ on TCP, 1.3 on QUIC |
+| `TLS_CERT_FILE`, `TLS_KEY_FILE` | — | Required unless `BEHIND_PROXY`. TLS 1.2+ on TCP, 1.3 on QUIC |
+| `BEHIND_PROXY` | `false` | `true` behind a TLS-terminating reverse proxy (e.g. APISIX): the public listener is plain HTTP/1.1 + h2c (gRPC), no HTTP/3 or `Alt-Svc`, tus `Location` URLs come from `X-Forwarded-Proto/-Host`, and the register rate limit keys on the last `X-Forwarded-For` entry. Only the proxy may reach `LISTEN_ADDR` |
 | `DATABASE_URL` | — | Required. PostgreSQL URL; migrations run at startup |
 | `JWT_SIGNING_KEY_FILE` | — | Required. PEM P-256 private key that signs access tokens (ES256); its public key is always accepted |
 | `JWT_VERIFY_KEYS_DIR` | *(empty = none)* | Directory of extra accepted public keys (`*.pem`), e.g. the previous signing key during a rollover |
@@ -634,7 +635,35 @@ Clients need `deploy/vps/secrets/ca.crt` from the server (`ca.key` also
 lives there, so keep the checkout private). Device admin:
 `cd /srv/sensor-upload && sudo docker compose exec server /devicectl ...`.
 
-### Connecting clients
+### Behind a reverse proxy (APISIX)
+
+When a proxy terminates TLS in front of the server
+(`https://<public>:9000 → APISIX → <host>:9000`, plain HTTP), deploy with
+`BEHIND_PROXY=true`; the script saves it in `.env` for later runs:
+
+```sh
+sudo BEHIND_PROXY=true deploy/vps/server-deploy.sh
+```
+
+Clients then use the proxy's URL and certificate (not `ca.crt`). Proxy-side
+requirements:
+
+- **tus** (`/rest/files/*`, `/v1/devices/*`, `/files/sha256/*`): HTTP
+  upstream; keep the `Host` header (or send `X-Forwarded-Host`) and send
+  `X-Forwarded-Proto: https`. Allow `PATCH`, `HEAD`, `DELETE` and the
+  `Tus-Resumable`, `Upload-*` headers, a body size of at least the client's
+  chunk size, and do not buffer request bodies (`proxy_request_buffering
+  off`), or a dropped connection loses the whole chunk instead of resuming.
+  The WAF should not inspect `application/offset+octet-stream` bodies.
+- **gRPC** (`/grpc/*`): a route with upstream scheme `grpc` (h2c); the
+  client connects to the proxy with TLS + HTTP/2.
+- **HTTP/3 is not available** (`/rest-http3/` returns 404): the proxy speaks
+  TCP to the server.
+- Rate limiting: one tus upload is many `PATCH` requests, so limit per
+  device/IP generously or exclude `PATCH /rest/files/*`.
+- Only the proxy may reach port 9000 on the server, since `X-Forwarded-*`
+  is trusted.
+
 
 Clients trust `deploy/vps/secrets/ca.crt` (the CA, not the server
 certificate). The certificate is valid for the IP only (plus any `VPS_SAN`),

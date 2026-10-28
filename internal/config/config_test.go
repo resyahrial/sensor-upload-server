@@ -111,6 +111,18 @@ func TestExplicitLogLevel(t *testing.T) {
 	}
 }
 
+func TestLoadBehindProxyNeedsNoTLS(t *testing.T) {
+	m := without("TLS_CERT_FILE", "TLS_KEY_FILE")
+	m["BEHIND_PROXY"] = "true"
+	c, err := Load(env(m))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !c.BehindProxy {
+		t.Error("BehindProxy = false, want true")
+	}
+}
+
 func TestLoadValidation(t *testing.T) {
 	tests := []struct {
 		name    string

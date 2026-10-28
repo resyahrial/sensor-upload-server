@@ -100,6 +100,9 @@ type Config struct {
 	// client IP; 0 = 10 and 10.
 	RegisterPerMinute int
 	RegisterBurst     int
+	// BehindProxy keys the register rate limit on the client address the
+	// reverse proxy appended to X-Forwarded-For, not the proxy's own.
+	BehindProxy bool
 	// Now overrides the clock (tests); defaults to time.Now. The Issuer
 	// has its own clock.
 	Now     func() time.Time

@@ -12,8 +12,14 @@
 #   every protocol: tus (TCP), tus over HTTP/3 (UDP) and gRPC via the /grpc
 #   prefix. Native gRPC (9090), admin/metrics and the MinIO console bind to
 #   127.0.0.1 only (SSH tunnel). Postgres and MinIO S3 are not published at
-#   all (MinIO's own :9000 is internal to the compose network). Docker publishes ports
-#   past ufw, so anything published here is reachable from the internet.
+#   all (MinIO's own :9000 is internal to the compose network). Docker
+#   publishes ports past ufw, so anything published here is reachable from
+#   the internet.
+# - BEHIND_PROXY=true in .env: a reverse proxy (e.g. APISIX) terminates TLS
+#   and forwards plain HTTP to HTTPS_PORT. The server then speaks HTTP/1.1
+#   and h2c (gRPC) there, has no HTTP/3, and trusts X-Forwarded-* headers,
+#   so only the proxy may reach HTTPS_PORT (set HTTPS_BIND to the private
+#   interface or firewall it at the provider).
 # - Data lives in bind mounts under DATA_DIR (default /srv/sensor-upload),
 #   created with the right owners by bootstrap.sh.
 #
@@ -134,6 +140,7 @@ services:
       METRICS_ADDR: ":9100"
       TLS_CERT_FILE: /certs/server.crt
       TLS_KEY_FILE: /certs/server.key
+      BEHIND_PROXY: ${BEHIND_PROXY:-false}
       JWT_SIGNING_KEY_FILE: /certs/jwt.key
       ACCESS_TOKEN_TTL: ${ACCESS_TOKEN_TTL:-1h}
       REFRESH_IDLE_TTL: ${REFRESH_IDLE_TTL:-2160h}

@@ -6,6 +6,7 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/resyahrial/sensor-upload-server/internal/auth"
@@ -62,7 +63,7 @@ type registerOutcome struct {
 }
 
 func (h *handler) register(w http.ResponseWriter, r *http.Request) result {
-	if ok, wait := h.limiter.allow(clientIP(r)); !ok {
+	if ok, wait := h.limiter.allow(clientIP(r, h.cfg.BehindProxy)); !ok {
 		setRetryAfter(w, wait)
 		writeError(w, http.StatusTooManyRequests, CodeRateLimited)
 		return result{code: http.StatusTooManyRequests, metric: obs.RegisterRateLimited}
@@ -174,8 +175,18 @@ func (h *handler) decideRegister(s *db.DeviceState, req RegisterRequest, now tim
 }
 
 // clientIP is the host of r.RemoteAddr (the whole value if it has no
-// port).
-func clientIP(r *http.Request) string {
+// port). Behind a reverse proxy it is the last X-Forwarded-For entry: the
+// address the proxy itself appended, which the client cannot forge.
+func clientIP(r *http.Request, behindProxy bool) string {
+	if xff := r.Header.Values("X-Forwarded-For"); behindProxy && len(xff) > 0 {
+		last := xff[len(xff)-1]
+		if i := strings.LastIndexByte(last, ','); i >= 0 {
+			last = last[i+1:]
+		}
+		if ip := strings.TrimSpace(last); ip != "" {
+			return ip
+		}
+	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return r.RemoteAddr

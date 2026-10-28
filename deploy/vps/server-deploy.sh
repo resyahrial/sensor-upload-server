@@ -16,7 +16,8 @@
 #   3. docker build of the root Dockerfile, tagged vps-<commit>-<time> and :vps
 #   4. installs docker-compose.yml, .env and certs into DATA_DIR
 #   5. docker compose up -d (restarts the server if certs changed), waits for
-#      /readyz and probes https://PUBLIC_IP:PUBLIC_PORT/rest/files/
+#      /readyz and probes https://PUBLIC_IP:PUBLIC_PORT/rest/files/ (behind a
+#      proxy: http://127.0.0.1:PUBLIC_PORT/rest/files/)
 #
 # Environment:
 #   PUBLIC_IP     public IP for the TLS certificate (default: detected via
@@ -26,6 +27,9 @@
 #   UFW           1 (default) to configure ufw on bootstrap, 0 to skip
 #   SAN           extra certificate SANs, e.g. DNS:upload.example.com
 #   DATA_DIR      default /srv/sensor-upload
+#   BEHIND_PROXY  true when a reverse proxy (e.g. APISIX) terminates TLS and
+#                 forwards plain HTTP to PUBLIC_PORT; saved into .env, so later
+#                 runs keep it (false switches back)
 #   BOOTSTRAP     1 to run bootstrap.sh even if the host looks set up
 #   READY_TIMEOUT seconds to wait for /readyz (default 180)
 set -euo pipefail
@@ -65,6 +69,13 @@ fi
 log "secrets (existing files are kept)"
 "$here/gen-secrets.sh" --ip "$PUBLIC_IP" ${SAN:+--san "$SAN"} --out "$SECRETS_DIR"
 
+if [[ -n ${BEHIND_PROXY:-} ]]; then
+	[[ $BEHIND_PROXY == true || $BEHIND_PROXY == false ]] || die "BEHIND_PROXY must be true or false"
+	sed -i '/^BEHIND_PROXY=/d' "$SECRETS_DIR/.env"
+	echo "BEHIND_PROXY=$BEHIND_PROXY" >>"$SECRETS_DIR/.env"
+fi
+behind_proxy=$(sed -n 's/^BEHIND_PROXY=//p' "$SECRETS_DIR/.env")
+
 tag="vps-$(git -C "$root" rev-parse --short HEAD 2>/dev/null || echo nogit)-$(date -u +%Y%m%d%H%M%S)"
 log "building $IMAGE_REPO:$tag"
 docker build -t "$IMAGE_REPO:$tag" -t "$IMAGE_REPO:vps" "$root"
@@ -101,8 +112,13 @@ until body=$(curl -fsS "http://127.0.0.1:${metrics_port:-9100}/readyz" 2>/dev/nu
 done
 echo "$body"
 
-url="https://$PUBLIC_IP:$PUBLIC_PORT"
-code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 --cacert certs/ca.crt "$url/rest/files/" || true)
+if [[ $behind_proxy == true ]]; then
+	url="http://127.0.0.1:$PUBLIC_PORT"
+	code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$url/rest/files/" || true)
+else
+	url="https://$PUBLIC_IP:$PUBLIC_PORT"
+	code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 --cacert certs/ca.crt "$url/rest/files/" || true)
+fi
 if [[ $code == 000 ]]; then
 	log "WARNING: $url not reachable from this host (provider firewall? hairpin NAT?)"
 else
