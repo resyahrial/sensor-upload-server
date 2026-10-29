@@ -24,7 +24,7 @@
 # ca.key never leaves this machine (deploy.sh does not copy it). jwt.key is
 # copied next to server.key (group-readable by the server container only).
 # Device credentials are not generated here: devices and refresh tokens live
-# in the VPS database (make vps-device-batch / vps-device-issue / vps-device-token).
+# in the VPS database (make vps-device-approve / vps-device-issue / vps-device-token).
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)

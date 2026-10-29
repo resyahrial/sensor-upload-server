@@ -23,7 +23,6 @@ import (
 
 // fakeStore is an in-memory deviceStore.
 type fakeStore struct {
-	batch    map[string]bool
 	devices  map[string]db.Device
 	families map[string]db.RefreshFamily
 	retired  []db.RetiredHash
@@ -32,11 +31,11 @@ type fakeStore struct {
 }
 
 func newFake() *fakeStore {
-	return &fakeStore{batch: map[string]bool{}, devices: map[string]db.Device{}, families: map[string]db.RefreshFamily{}}
+	return &fakeStore{devices: map[string]db.Device{}, families: map[string]db.RefreshFamily{}}
 }
 
 func (f *fakeStore) Update(_ context.Context, id string, fn func(s *db.DeviceState) error) error {
-	s := &db.DeviceState{DeviceID: id, InBatch: f.batch[id]}
+	s := &db.DeviceState{DeviceID: id}
 	if d, ok := f.devices[id]; ok {
 		s.Device = &d
 	}
@@ -72,17 +71,6 @@ func (f *fakeStore) Get(_ context.Context, id string) (db.Device, error) {
 
 func (f *fakeStore) PruneRetired(context.Context, time.Time) (int64, error) { return 0, nil }
 
-func (f *fakeStore) ImportBatch(_ context.Context, ids []string) (int64, error) {
-	var n int64
-	for _, id := range ids {
-		if !f.batch[id] {
-			f.batch[id] = true
-			n++
-		}
-	}
-	return n, nil
-}
-
 func (f *fakeStore) List(_ context.Context, status db.DeviceStatus) ([]db.Device, error) {
 	f.listed = status
 	var out []db.Device
@@ -104,7 +92,6 @@ var testNow = time.Date(2026, 10, 27, 3, 0, 0, 0, time.UTC)
 type harness struct {
 	store          *fakeStore
 	env            map[string]string
-	stdin          string
 	stdout, stderr bytes.Buffer
 	key            *ecdsa.PrivateKey
 }
@@ -136,7 +123,6 @@ func (h *harness) run(args ...string) error {
 		},
 		getenv: func(k string) string { return h.env[k] },
 		now:    func() time.Time { return testNow },
-		stdin:  strings.NewReader(h.stdin),
 		stdout: &h.stdout,
 		stderr: &h.stderr,
 	})
@@ -157,7 +143,7 @@ func (h *harness) verify(t *testing.T, tok string) *auth.Claims {
 
 func TestUsageAndArgumentErrors(t *testing.T) {
 	h := newHarness(t)
-	if err := h.run("help"); !errors.Is(err, flag.ErrHelp) || !strings.Contains(h.stderr.String(), "devicectl batch-import") {
+	if err := h.run("help"); !errors.Is(err, flag.ErrHelp) || !strings.Contains(h.stderr.String(), "devicectl approve") {
 		t.Fatalf("help: %v", err)
 	}
 	for _, args := range [][]string{
@@ -167,8 +153,7 @@ func TestUsageAndArgumentErrors(t *testing.T) {
 		{"approve", "-device", "Bad_ID"},
 		{"approve", "-device", "dev-0001", "extra"},
 		{"list", "-status", "gone"},
-		{"batch-import"},
-		{"batch-import", "-device", "x"},
+		{"batch-import", "-device", "dev-0001"},
 		{"access-token", "-device", "dev-0001", "-ttl", "-1h"},
 	} {
 		if err := h.run(args...); err == nil {
@@ -180,42 +165,9 @@ func TestUsageAndArgumentErrors(t *testing.T) {
 	}
 }
 
-func TestBatchImport(t *testing.T) {
-	h := newHarness(t)
-	h.stdin = "# factory batch 7\nbatch-0001\n\n  batch-0002  # second\nbatch-0001\n"
-	if err := h.run("batch-import", "-file", "-", "-device", "extra-0001"); err != nil {
-		t.Fatal(err)
-	}
-	for _, id := range []string{"batch-0001", "batch-0002", "extra-0001"} {
-		if !h.store.batch[id] {
-			t.Fatalf("%s not imported", id)
-		}
-	}
-	if !strings.Contains(h.stderr.String(), "4 device ids imported (3 new)") {
-		t.Fatalf("stderr = %q", h.stderr.String())
-	}
-
-	path := filepath.Join(t.TempDir(), "ids.txt")
-	if err := os.WriteFile(path, []byte("file-0001\nNOT VALID\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	err := h.run("batch-import", "-file", path)
-	if err == nil || !strings.Contains(err.Error(), "ids.txt:2") {
-		t.Fatalf("invalid line: %v", err)
-	}
-	if h.store.batch["file-0001"] {
-		t.Fatal("partial import on error")
-	}
-	h.stdin = "# only comments\n"
-	if err := h.run("batch-import", "-file", "-"); err == nil {
-		t.Fatal("empty file accepted")
-	}
-}
-
 func TestListAndStatusCommands(t *testing.T) {
 	h := newHarness(t)
 	lat, lon, fw := -6.2, 106.816666, "1.2\t3"
-	h.store.batch["dev-0001"], h.store.batch["dev-0002"] = true, true
 	h.store.devices["dev-0001"] = db.Device{DeviceID: "dev-0001", Status: db.DevicePending, Lat: &lat, Lon: &lon,
 		Firmware: &fw, RegisteredAt: testNow, LastSeenAt: testNow.Add(time.Minute)}
 	h.store.devices["dev-0002"] = db.Device{DeviceID: "dev-0002", Status: db.DeviceActive, RegisteredAt: testNow, LastSeenAt: testNow}
@@ -274,8 +226,8 @@ func TestIssue(t *testing.T) {
 	if c.Subject != "dev-0003" || c.Issuer != "test-iss" || !c.ExpiresAt.Equal(testNow.Add(2*time.Hour)) {
 		t.Fatalf("claims = %+v", c)
 	}
-	if !h.store.batch["dev-0003"] || h.store.devices["dev-0003"].Status != db.DeviceActive {
-		t.Fatal("issue did not import and activate the device")
+	if h.store.devices["dev-0003"].Status != db.DeviceActive {
+		t.Fatal("issue did not activate the device")
 	}
 	fam := h.store.families["dev-0003"]
 	if !bytes.Equal(fam.CurrentHash, auth.HashSecret(res.RefreshToken)) {
@@ -297,21 +249,19 @@ func TestIssue(t *testing.T) {
 
 func TestAccessToken(t *testing.T) {
 	h := newHarness(t)
-	h.store.batch["dev-0004"] = true
 	h.store.devices["dev-0004"] = db.Device{DeviceID: "dev-0004", Status: db.DevicePending}
 	h.store.devices["dev-0006"] = db.Device{DeviceID: "dev-0006", Status: db.DeviceRevoked}
-	h.store.batch["dev-0006"] = true
 	if err := h.run("access-token", "-device", "dev-0006"); !errors.Is(err, deviceapi.ErrNotActive) {
 		t.Fatalf("revoked device: %v", err)
 	}
 	if h.store.devices["dev-0006"].Status != db.DeviceRevoked {
 		t.Fatal("access-token changed a revoked device")
 	}
-	// A fresh device is allow-listed and activated.
+	// A fresh device is created and activated.
 	if err := h.run("access-token", "-device", "dev-0005"); err != nil {
 		t.Fatalf("fresh device: %v", err)
 	}
-	if !h.store.batch["dev-0005"] || h.store.devices["dev-0005"].Status != db.DeviceActive {
+	if h.store.devices["dev-0005"].Status != db.DeviceActive {
 		t.Fatalf("dev-0005 not activated: %+v", h.store.devices["dev-0005"])
 	}
 	h.stdout.Reset()

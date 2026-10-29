@@ -100,7 +100,6 @@ The sensor repeats the same request to poll until ops decides. No `Authorization
 | `202 Accepted` `{"status":"pending"}`, `Retry-After: 3600` | Pending ops approval | Keep buffering files; poll again after `Retry-After` seconds |
 | `200 OK` with the token pair (below) | Approved | Save the pair (section 7.1), then delete the poll secret |
 | `400` `{"error":"invalid_request"}` | Malformed body or field | Fix; do not retry |
-| `403` `{"error":"device_not_allowed"}` | Device ID is not on the pre-imported batch list | Stop; needs a technician |
 | `403` `{"error":"device_not_active"}` | Rejected or revoked by ops | Stop; needs a technician |
 | `409` `{"error":"poll_secret_mismatch"}` | A different poll secret is already registered for this device ID | Stop; needs a technician |
 | `429` `{"error":"rate_limited"}` | Too many requests from this IP | Back off; honour `Retry-After` if present |
@@ -120,7 +119,7 @@ The sensor repeats the same request to poll until ops decides. No `Authorization
 
 - `expires_in` is the access token's lifetime in seconds. `refresh_expires_at` is the latest moment the refresh token can work (365 days after registration); it stops earlier if unused for 90 days.
 - If the `200` response is lost, poll again with the same poll secret: the platform returns a token pair again, until the refresh token is used for the first time. After that the poll secret is cleared and no longer works.
-- The platform checks that the device ID is on the pre-imported batch list, keeps the poll secret's hash from the first call, and shows ops the device ID, location and time before approving.
+- Any device ID matching `^[a-z0-9][a-z0-9-]{2,63}$` (lowercase only) can register. The platform keeps the poll secret's hash from the first call, and shows ops the device ID, location and time before approving.
 
 **Registering again:** when the refresh token has expired (`invalid_grant`, section 3), generate a **new** poll secret and register again. The device goes back to pending and ops approves it again.
 

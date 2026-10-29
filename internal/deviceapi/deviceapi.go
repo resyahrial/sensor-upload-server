@@ -1,8 +1,8 @@
 // Package deviceapi serves device registration and refresh token rotation
 // (docs/decisions.md "Decisions (JWT + refresh)"):
 //
-//	POST /v1/devices/register       allow-listed device asks to join; 202 while
-//	                                pending, 200 token pair once approved
+//	POST /v1/devices/register       any device asks to join; 202 while pending,
+//	                                200 token pair once approved
 //	POST /v1/devices/token/refresh  rotate the refresh token, get a new access token
 //
 // Both are unauthenticated JSON endpoints; errors are {"error":"<code>"}.
@@ -37,7 +37,6 @@ const (
 // Error codes (the "error" field of error responses).
 const (
 	CodeInvalidRequest     = "invalid_request"
-	CodeDeviceNotAllowed   = "device_not_allowed"
 	CodeDeviceNotActive    = "device_not_active"
 	CodePollSecretMismatch = "poll_secret_mismatch"
 	CodeInvalidGrant       = "invalid_grant"
@@ -131,7 +130,6 @@ type pendingBody struct {
 
 // Outcomes of the state machine callbacks (never leave the package).
 var (
-	errNotAllowed   = errors.New("device not in batch")
 	errNotActive    = errors.New("device not active")
 	errMismatch     = errors.New("poll secret mismatch")
 	errExpired      = errors.New("refresh family expired")
@@ -288,18 +286,15 @@ type IssueConfig struct {
 	Now     time.Time
 }
 
-// Issue is the devicectl shortcut: it makes the (batch-imported) device
-// active, creating its row if needed, starts a new refresh family
-// (retiring any previous one) and returns the token pair.
+// Issue is the devicectl shortcut: it makes the device active, creating
+// its row if needed, starts a new refresh family (retiring any previous
+// one) and returns the token pair.
 func Issue(ctx context.Context, cfg IssueConfig, device string) (TokenResponse, error) {
 	var (
 		refresh string
 		fam     *db.RefreshFamily
 	)
 	err := cfg.Store.Update(ctx, device, func(s *db.DeviceState) error {
-		if !s.InBatch {
-			return fmt.Errorf("device %q: %w", device, db.ErrNotInBatch)
-		}
 		now := cfg.Now
 		if s.Device == nil {
 			s.Device = &db.Device{DeviceID: device, RegisteredAt: now, LastSeenAt: now}
@@ -325,15 +320,11 @@ func Issue(ctx context.Context, cfg IssueConfig, device string) (TokenResponse, 
 // ErrNotActive is returned by Activate for a rejected or revoked device.
 var ErrNotActive = errors.New("device is rejected or revoked")
 
-// Activate is the devicectl access-token shortcut: it makes the
-// (batch-imported) device active, creating its row if needed, and leaves its
-// refresh family alone. A rejected or revoked device stays as it is and
+// Activate is the devicectl access-token shortcut: it makes the device
+// active, creating its row if needed, and leaves its refresh family alone. A rejected or revoked device stays as it is and
 // gets ErrNotActive, so experiments cannot silently undo an ops decision.
 func Activate(ctx context.Context, store Store, device string, now time.Time) error {
 	return store.Update(ctx, device, func(s *db.DeviceState) error {
-		if !s.InBatch {
-			return fmt.Errorf("device %q: %w", device, db.ErrNotInBatch)
-		}
 		if s.Device == nil {
 			s.Device = &db.Device{DeviceID: device, RegisteredAt: now, LastSeenAt: now}
 		}

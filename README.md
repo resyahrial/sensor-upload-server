@@ -65,7 +65,7 @@ admin :9100 (plain HTTP): /metrics /healthz /readyz      expiry cleaner (every C
 ```
 cmd/server      server main (config, signals; wiring is in internal/app)
 cmd/uploader    test client: rest | rest-http3 | grpc | grpc-native, SQLite outbox, CSV report
-cmd/devicectl   device ops: batch-import | list | approve | reject | revoke | issue | access-token
+cmd/devicectl   device ops: list | approve | reject | revoke | issue | access-token
 cmd/summarize   merges experiment CSVs into results/summary.csv
 internal/       app, auth, cleanup, client, config, db, deviceapi, finalize, grpcadapt, grpcapi,
                 grpcprefix, httpx, meta, objstore, obs, staging, tusapi
@@ -165,7 +165,7 @@ Both are JSON over the TLS TCP listener and need no `Authorization` header.
 
 | Endpoint | Request | Responses |
 |---|---|---|
-| `POST /v1/devices/register` | `{"device_id","poll_secret","lat","lon","firmware"}` | `202` `{"status":"pending"}` + `Retry-After` (`REGISTER_RETRY_AFTER`, 1h); `200` token pair once approved; `400 invalid_request`; `403 device_not_allowed` (not on the batch list); `403 device_not_active` (rejected/revoked); `409 poll_secret_mismatch`; `429 rate_limited` (per IP) |
+| `POST /v1/devices/register` | `{"device_id","poll_secret","lat","lon","firmware"}` | `202` `{"status":"pending"}` + `Retry-After` (`REGISTER_RETRY_AFTER`, 1h); `200` token pair once approved; `400 invalid_request`; `403 device_not_active` (rejected/revoked); `409 poll_secret_mismatch`; `429 rate_limited` (per IP) |
 | `POST /v1/devices/token/refresh` | `{"refresh_token":"…"}` | `200` token pair; `400 invalid_request`; `401 invalid_grant` (unknown, reused, idle or max-age expired: register again); `403 device_not_active`; `503 temporarily_unavailable` |
 
 The token pair has the same shape from register, refresh and `devicectl issue`:
@@ -177,9 +177,10 @@ The token pair has the same shape from register, refresh and `devicectl issue`:
 
 Error bodies are `{"error":"<code>"}`.
 
-- **Registration.** The device id must be on the pre-imported batch list
-  (`devicectl batch-import`). The first call stores the poll secret's hash and
-  the device is `pending`. After `devicectl approve`, the same poll secret
+- **Registration.** Any device may register with a valid device id
+  (`^[a-z0-9][a-z0-9-]{2,63}$`). The first call creates the device as
+  `pending` and stores the poll secret's hash; ops see it in
+  `devicectl list -status pending` and approve or reject it. After `devicectl approve`, the same poll secret
   collects the pair, again and again until the refresh token is first used
   (so a lost `200` is harmless); then the poll secret is cleared. When the
   refresh family has expired, registering with a **new** poll secret puts the
@@ -238,15 +239,14 @@ there is nothing else to configure.
 
 | Command | What |
 |---|---|
-| `batch-import -file PATH\|-` or `batch-import -device ID` | Add device ids to the batch list (one per line) |
 | `list [-status ...]` | Devices and their status (never tokens or hashes) |
 | `approve -device ID` / `reject -device ID` / `revoke -device ID` | Ops decisions; `revoke` blocks refresh immediately |
 | `issue -device ID` | Dev/ops shortcut: activates the device and prints a token pair JSON |
-| `access-token -device ID [-ttl 24h]` | Dev shortcut: allow-lists and activates the device (refused if rejected/revoked; refresh tokens untouched) and prints only an access JWT (experiments, remote e2e) |
+| `access-token -device ID [-ttl 24h]` | Dev shortcut: activates the device, creating it if needed (refused if rejected/revoked; refresh tokens untouched) and prints only an access JWT (experiments, remote e2e) |
 
 | Where | How |
 |---|---|
-| Dev stack (`make up`) | `make device-batch DEVICE=dev-1`, `make device-approve DEVICE=dev-1`, `make device-list`, `make device-issue DEVICE=dev-1` (token pair JSON), `make device-token DEVICE=dev-1 [TTL=24h]` (access JWT) |
+| Dev stack (`make up`) | `make device-approve DEVICE=dev-1`, `make device-list`, `make device-issue DEVICE=dev-1` (token pair JSON), `make device-token DEVICE=dev-1 [TTL=24h]` (access JWT) |
 | VPS | the same targets with a `vps-` prefix, e.g. `make -s vps-device-token VPS=root@$VPS_IP VPS_DEVICE=dev-1` (ssh + `docker compose exec server /devicectl ...`) |
 | Any database | `DATABASE_URL=postgres://... JWT_SIGNING_KEY_FILE=certs/jwt.key go run ./cmd/devicectl issue -device dev-1` |
 
@@ -379,7 +379,7 @@ it: the percentage is then that of the disk MinIO and staging share. Metrics:
 Deletes run in batches of 500, with one info log line (`retention batch`) per
 batch.
 
-Device state (batch list, approval, refresh token hashes) lives in Postgres
+Device state (registrations, approval, refresh token hashes) lives in Postgres
 (see [Authentication](#authentication)). `JWT_ALGS`, `JWT_PUBLIC_KEY_FILE`,
 `JWT_HMAC_SECRET` and `DEV_MODE` from the first JWT version no longer exist and
 are ignored if set; use `LOG_LEVEL=debug` for what `DEV_MODE` used to switch on.
@@ -587,8 +587,8 @@ make vps-bootstrap VPS=root@$VPS_IP      # VPS_DEPLOY_USER=ubuntu to deploy as a
 #    and waits for /readyz.
 make vps-deploy VPS=root@$VPS_IP
 
-# 4. Devices: batch list, approval, tokens (README "Authentication"):
-make vps-device-batch   VPS=root@$VPS_IP VPS_DEVICE=dev-1    # sensors then register themselves
+# 4. Devices: sensors register themselves, then approval and tokens (README "Authentication"):
+make vps-device-list    VPS=root@$VPS_IP STATUS=pending
 make vps-device-approve VPS=root@$VPS_IP VPS_DEVICE=dev-1
 make vps-device-list    VPS=root@$VPS_IP
 make -s vps-device-issue VPS=root@$VPS_IP VPS_DEVICE=dev-1 > dev-1.json   # dev shortcut: token pair JSON

@@ -39,7 +39,6 @@ const (
 // testStore is a Store plus the admin operations devicectl uses.
 type testStore interface {
 	Store
-	ImportBatch(ctx context.Context, ids []string) (int64, error)
 	SetStatus(ctx context.Context, id string, status db.DeviceStatus, now time.Time) error
 }
 
@@ -151,16 +150,11 @@ func (e *env) ctx() context.Context {
 	return ctx
 }
 
-// newDevice returns a fresh batch-imported device id.
+// newDevice returns a fresh, never registered device id.
 func (e *env) newDevice() string {
-	e.t.Helper()
 	b := make([]byte, 6)
 	_, _ = rand.Read(b)
-	id := "dev-" + hex.EncodeToString(b)
-	if _, err := e.store.ImportBatch(e.ctx(), []string{id}); err != nil {
-		e.t.Fatal(err)
-	}
-	return id
+	return "dev-" + hex.EncodeToString(b)
 }
 
 func (e *env) setStatus(device string, status db.DeviceStatus) {
@@ -262,8 +256,13 @@ func runSuite(t *testing.T, newStore func(t *testing.T) testStore) {
 		name string
 		fn   func(t *testing.T, e *env)
 	}{
-		{"not in batch", func(t *testing.T, e *env) {
-			wantError(t, e.register("never-imported-0001", newSecret(t)), http.StatusForbidden, CodeDeviceNotAllowed)
+		{"unknown device registers pending", func(t *testing.T, e *env) {
+			dev := e.newDevice()
+			wantPending(t, e.register(dev, newSecret(t)))
+			d, err := e.store.Get(e.ctx(), dev)
+			if err != nil || d.Status != db.DevicePending {
+				t.Fatalf("Get = %+v, %v; want pending", d, err)
+			}
 		}},
 		{"pending then mismatch", func(t *testing.T, e *env) {
 			dev, secret := e.newDevice(), newSecret(t)

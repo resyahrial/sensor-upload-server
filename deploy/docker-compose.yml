@@ -1,8 +1,9 @@
 # Local stack: upload server + PostgreSQL + MinIO.
 # Start with `make up` (runs `make devcert` first), stop with `make down`.
-# Devices: `make device-batch DEVICE=netem-0001` registers one (active), then
-# `make -s device-token DEVICE=netem-0001` prints an access JWT and
-# `make -s device-issue DEVICE=netem-0001` a token pair (see the Makefile).
+# Devices: register via POST /v1/devices/register, then `make device-approve
+# DEVICE=netem-0001`. To skip registration, `make -s device-token
+# DEVICE=netem-0001` prints an access JWT and `make -s device-issue
+# DEVICE=netem-0001` a token pair (see the Makefile).
 # DEV ONLY: MinIO/Postgres default credentials, plain-HTTP
 # admin port. Host ports are published on 127.0.0.1 only (HOST_BIND; set it to
 # 0.0.0.0 only on a trusted network) and default to 18443 (TCP+UDP), 19090

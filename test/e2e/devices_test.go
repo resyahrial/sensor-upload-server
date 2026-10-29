@@ -75,12 +75,6 @@ func TestDeviceLifecycle(t *testing.T) {
 	secret, _ := auth.GenerateSecret()
 	reg := map[string]any{"device_id": dev, "poll_secret": secret, "lat": -1.23, "lon": 113.4, "firmware": "1.4.0"}
 
-	if code, e := postJSON(t, s, "/v1/devices/register", reg, nil); code != http.StatusForbidden || e != "device_not_allowed" {
-		t.Fatalf("register before batch import: %d %q", code, e)
-	}
-	if _, err := devs.ImportBatch(ctx, []string{dev}); err != nil {
-		t.Fatal(err)
-	}
 	if code, _ := postJSON(t, s, "/v1/devices/register", reg, nil); code != http.StatusAccepted {
 		t.Fatalf("first register: %d, want 202", code)
 	}
@@ -147,9 +141,6 @@ func TestUploaderRefreshes(t *testing.T) {
 	s := StartServer(t, map[string]string{"ACCESS_TOKEN_TTL": "3s"})
 	dev := device()
 	devs := devicesDB(t, s)
-	if _, err := devs.ImportBatch(context.Background(), []string{dev}); err != nil {
-		t.Fatal(err)
-	}
 	pair, err := deviceapi.Issue(context.Background(), deviceapi.IssueConfig{
 		Store: devs, Issuer: mustIssuer(t, 3*time.Second),
 		IdleTTL: time.Hour, MaxAge: 24 * time.Hour, Now: time.Now(),

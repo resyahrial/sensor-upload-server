@@ -6,8 +6,7 @@
 #   make vps-deploy    VPS=root@203.0.113.10 [VPS_ARCH=arm64]
 #   make vps-status | vps-logs [SERVICE=server FOLLOW=1] | vps-down | vps-wipe  VPS=...
 #   make vps-tunnel    VPS=...   # localhost:9100 admin/metrics, localhost:9001 MinIO console
-#   make vps-device-batch   VPS=... VPS_DEVICE=dev-1   # register dev-1 (batch import)
-#   make vps-device-approve VPS=... VPS_DEVICE=dev-1   # approve a pending device
+#   make vps-device-approve VPS=... VPS_DEVICE=dev-1   # approve a device pending after registering
 #   make -s vps-device-issue VPS=... VPS_DEVICE=dev-1 > tokens.json   # token pair (uploader -refresh-token-file)
 #   TOKEN=$$(make -s vps-device-token VPS=... VPS_DEVICE=dev-1 [TTL=24h])   # access JWT (uploader -token)
 #   make vps-device-revoke VPS=... VPS_DEVICE=dev-1 | vps-device-list VPS=... [STATUS=active]
@@ -34,7 +33,7 @@ VPS_DEPLOY = VPS='$(VPS)' VPS_IP='$(VPS_IP)' VPS_ARCH='$(VPS_ARCH)' \
 	SSH_OPTS='$(VPS_SSH_OPTS)' GO='$(GO)' deploy/vps/deploy.sh
 
 .PHONY: vps-secrets vps-bootstrap vps-deploy vps-status vps-logs vps-down vps-wipe vps-tunnel \
-	vps-device-batch vps-device-approve vps-device-reject vps-device-revoke vps-device-issue vps-device-token vps-device-list
+	vps-device-approve vps-device-reject vps-device-revoke vps-device-issue vps-device-token vps-device-list
 
 vps-require-%:
 	@test -n '$($*)' || { echo "set $*=... (see mk/vps.mk)" >&2; exit 2; }
@@ -68,10 +67,6 @@ vps-wipe: vps-require-VPS
 
 # Device admin on the VPS: ssh + docker compose exec server /devicectl.
 VPS_DEVICECTL = DEVICE='$(VPS_DEVICE)' TTL='$(TTL)' STATUS='$(STATUS)' $(VPS_DEPLOY) device
-
-## vps-device-batch: register VPS_DEVICE (batch import, active).
-vps-device-batch: vps-require-VPS vps-require-VPS_DEVICE
-	@DEVICE_CMD=batch-import $(VPS_DEVICECTL)
 
 ## vps-device-approve / -reject / -revoke: change VPS_DEVICE's status.
 vps-device-approve: vps-require-VPS vps-require-VPS_DEVICE

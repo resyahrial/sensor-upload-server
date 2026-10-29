@@ -130,4 +130,4 @@ docker images --format '{{.Repository}}:{{.Tag}}' "$IMAGE_REPO" | grep ':vps-' |
 	xargs -r docker rmi >/dev/null 2>&1 || true
 
 log "deployed $IMAGE_REPO:$tag"
-log "clients trust $SECRETS_DIR/ca.crt; devices: cd $DATA_DIR && docker compose exec server /devicectl batch-import -device <id>"
+log "clients trust $SECRETS_DIR/ca.crt; devices register themselves, then: cd $DATA_DIR && docker compose exec server /devicectl approve -device <id>"

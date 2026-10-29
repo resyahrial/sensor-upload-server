@@ -16,8 +16,6 @@ var (
 	ErrDeviceNotFound = errors.New("device not found")
 	// ErrTokenNotFound means no refresh token (live or retired) has the hash.
 	ErrTokenNotFound = errors.New("refresh token not found")
-	// ErrNotInBatch means the device id is not in device_batch.
-	ErrNotInBatch = errors.New("device not in batch")
 )
 
 // DeviceStatus is the registration state of a device.
@@ -86,9 +84,8 @@ type RetiredHash struct {
 // DeviceState is the locked state of one device handed to an Update
 // callback. The callback changes it in place; Update then persists it.
 type DeviceState struct {
-	// DeviceID and InBatch are read-only.
+	// DeviceID is read-only.
 	DeviceID string
-	InBatch  bool
 	// Device is nil when there is no row; setting it creates the row.
 	// Setting an existing Device to nil is an error (rows are never
 	// deleted).
@@ -118,20 +115,6 @@ type Devices struct {
 
 // NewDevices returns a Devices using pool.
 func NewDevices(pool *pgxpool.Pool) *Devices { return &Devices{pool: pool} }
-
-// ImportBatch adds ids to the allow-list and returns how many were new.
-func (d *Devices) ImportBatch(ctx context.Context, ids []string) (int64, error) {
-	if len(ids) == 0 {
-		return 0, nil
-	}
-	tag, err := d.pool.Exec(ctx, `
-		INSERT INTO device_batch (device_id) SELECT unnest($1::text[])
-		ON CONFLICT (device_id) DO NOTHING`, ids)
-	if err != nil {
-		return 0, fmt.Errorf("import device batch: %w", err)
-	}
-	return tag.RowsAffected(), nil
-}
 
 // Get returns the device row, or ErrDeviceNotFound.
 func (d *Devices) Get(ctx context.Context, id string) (Device, error) {
@@ -193,9 +176,10 @@ func (d *Devices) PruneRetired(ctx context.Context, before time.Time) (int64, er
 }
 
 // Update runs fn on the device's state inside a transaction and persists
-// what fn changed. The device_batch row (which serializes all changes of
-// one device), the devices row and the refresh_tokens row are locked with
-// SELECT ... FOR UPDATE first. If fn returns an error nothing is written
+// what fn changed. A transaction advisory lock on the device id (which
+// serializes all changes of one device, including the first insert) is
+// taken first, then the devices and refresh_tokens rows are locked with
+// SELECT ... FOR UPDATE. If fn returns an error nothing is written
 // and that error is returned unchanged.
 func (d *Devices) Update(ctx context.Context, id string, fn func(s *DeviceState) error) (err error) {
 	tx, err := d.pool.Begin(ctx)
@@ -226,15 +210,12 @@ func (d *Devices) Update(ctx context.Context, id string, fn func(s *DeviceState)
 
 func lockState(ctx context.Context, tx pgx.Tx, id string) (*DeviceState, error) {
 	s := &DeviceState{DeviceID: id}
-	var one int
-	err := tx.QueryRow(ctx, `SELECT 1 FROM device_batch WHERE device_id = $1 FOR UPDATE`, id).Scan(&one)
-	switch {
-	case errors.Is(err, pgx.ErrNoRows):
-		return s, nil // no devices row can exist (foreign key)
-	case err != nil:
-		return nil, fmt.Errorf("lock device batch: %w", err)
+	// A row lock cannot cover a devices row that does not exist yet, so two
+	// first registrations would race on the insert; the advisory lock
+	// (released at commit/rollback) serializes them.
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, id); err != nil {
+		return nil, fmt.Errorf("lock device id: %w", err)
 	}
-	s.InBatch = true
 	rows, _ := tx.Query(ctx, `SELECT `+deviceColumns+` FROM devices WHERE device_id = $1 FOR UPDATE`, id)
 	dev, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[Device])
 	switch {
@@ -262,8 +243,6 @@ func persistState(ctx context.Context, tx pgx.Tx, s *DeviceState, hadDevice, had
 	switch {
 	case dev == nil && hadDevice:
 		return fmt.Errorf("device %q: devices rows cannot be deleted", s.DeviceID)
-	case dev != nil && !s.InBatch:
-		return fmt.Errorf("device %q: %w", s.DeviceID, ErrNotInBatch)
 	case dev != nil && !hadDevice:
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO devices (device_id, status, poll_secret_hash, lat, lon, firmware,

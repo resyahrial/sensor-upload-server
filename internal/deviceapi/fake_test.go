@@ -15,7 +15,6 @@ import (
 // db.Devices.Update.
 type fakeStore struct {
 	mu       sync.Mutex
-	batch    map[string]bool
 	devices  map[string]db.Device
 	families map[string]db.RefreshFamily
 	retired  map[string]db.TokenMatch // key: string(hash)
@@ -23,18 +22,13 @@ type fakeStore struct {
 	fail     error // returned by every call when set
 }
 
-func newFakeStore(batch ...string) *fakeStore {
-	f := &fakeStore{
-		batch:    map[string]bool{},
+func newFakeStore() *fakeStore {
+	return &fakeStore{
 		devices:  map[string]db.Device{},
 		families: map[string]db.RefreshFamily{},
 		retired:  map[string]db.TokenMatch{},
 		retireAt: map[string]time.Time{},
 	}
-	for _, id := range batch {
-		f.batch[id] = true
-	}
-	return f
 }
 
 func (f *fakeStore) Update(_ context.Context, id string, fn func(s *db.DeviceState) error) error {
@@ -43,7 +37,7 @@ func (f *fakeStore) Update(_ context.Context, id string, fn func(s *db.DeviceSta
 	if f.fail != nil {
 		return f.fail
 	}
-	s := &db.DeviceState{DeviceID: id, InBatch: f.batch[id]}
+	s := &db.DeviceState{DeviceID: id}
 	if d, ok := f.devices[id]; ok {
 		s.Device = &d
 	}
@@ -57,8 +51,6 @@ func (f *fakeStore) Update(_ context.Context, id string, fn func(s *db.DeviceSta
 	switch {
 	case s.Device == nil && hadDevice:
 		return errors.New("fake: delete device")
-	case s.Device != nil && !s.InBatch:
-		return db.ErrNotInBatch
 	case s.Device != nil:
 		f.devices[id] = *s.Device
 	}
@@ -125,19 +117,6 @@ func (f *fakeStore) device(id string) db.Device {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.devices[id]
-}
-
-func (f *fakeStore) ImportBatch(_ context.Context, ids []string) (int64, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	var n int64
-	for _, id := range ids {
-		if !f.batch[id] {
-			f.batch[id] = true
-			n++
-		}
-	}
-	return n, nil
 }
 
 func (f *fakeStore) SetStatus(ctx context.Context, id string, status db.DeviceStatus, now time.Time) error {

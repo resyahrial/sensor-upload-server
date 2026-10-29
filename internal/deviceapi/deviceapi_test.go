@@ -55,7 +55,7 @@ func TestRoutingAndMethods(t *testing.T) {
 }
 
 func TestInvalidRequests(t *testing.T) {
-	e := newEnv(t, newFakeStore("dev-0001"), 0)
+	e := newEnv(t, newFakeStore(), 0)
 	secret := newSecret(t)
 	big := `{"device_id":"dev-0001","poll_secret":"` + secret + `","firmware":"` + strings.Repeat("x", 5000) + `"}`
 	for name, body := range map[string]string{
@@ -194,7 +194,7 @@ func TestPruneRetired(t *testing.T) {
 }
 
 func TestRegisterUpdatesPendingLocation(t *testing.T) {
-	store := newFakeStore("dev-0002")
+	store := newFakeStore()
 	e := newEnv(t, store, 0)
 	secret := newSecret(t)
 	wantPending(t, e.register("dev-0002", secret))

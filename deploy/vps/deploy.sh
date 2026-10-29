@@ -10,7 +10,7 @@
 #   deploy.sh logs     docker compose logs (SERVICE, TAIL, FOLLOW=1)
 #   deploy.sh down     docker compose down (data is kept)
 #   deploy.sh wipe     down + delete everything in pgdata/ minio/ staging/ (asks first)
-#   deploy.sh device   DEVICE_CMD=batch-import|approve|reject|revoke|issue|access-token|list
+#   deploy.sh device   DEVICE_CMD=approve|reject|revoke|issue|access-token|list
 #                      [DEVICE=id] [TTL=24h] [STATUS=active]: run /devicectl in
 #                      the server container; issue prints a token pair JSON,
 #                      access-token an access JWT (stdout)
@@ -207,7 +207,7 @@ cmd_wipe() {
 cmd_device() {
 	local cmd=${DEVICE_CMD:-} dev=${DEVICE:-} ttl=${TTL:-} st=${STATUS:-} args=""
 	case $cmd in
-	batch-import | approve | reject | revoke | issue | access-token)
+	approve | reject | revoke | issue | access-token)
 		# Same rule as metadata device_id; also keeps the remote command safe.
 		[[ $dev =~ ^[a-z0-9][a-z0-9-]{2,63}$ ]] || die "DEVICE='$dev' must match ^[a-z0-9][a-z0-9-]{2,63}$"
 		args="-device $dev"
@@ -222,7 +222,7 @@ cmd_device() {
 			args="-status $st"
 		fi
 		;;
-	*) die "DEVICE_CMD must be batch-import, approve, reject, revoke, issue, access-token or list" ;;
+	*) die "DEVICE_CMD must be approve, reject, revoke, issue, access-token or list" ;;
 	esac
 	remote "docker compose exec -T server /devicectl $cmd $args"
 }

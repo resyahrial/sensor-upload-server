@@ -25,7 +25,7 @@ HOST_GRPC_PORT    ?= 19090
 HOST_METRICS_PORT ?= 19100
 export HOST_BIND HOST_HTTPS_PORT HOST_GRPC_PORT HOST_METRICS_PORT
 
-.PHONY: build test test-integration up down devcert lint device-issue device-token device-approve device-list device-batch device-require
+.PHONY: build test test-integration up down devcert lint device-issue device-token device-approve device-list device-require
 
 build:
 	CGO_ENABLED=0 $(GO) build -trimpath -o $(BIN_DIR)/ ./cmd/...
@@ -71,8 +71,7 @@ down:
 	$(COMPOSE) -f $(COMPOSE_FILE) down
 
 # Device admin in the running dev stack (`make up`) through /devicectl:
-#   make device-batch DEVICE=netem-0001     # pre-register (batch import) DEVICE
-#   make device-approve DEVICE=netem-0001   # approve a pending device
+#   make device-approve DEVICE=netem-0001   # approve a device pending after registering
 #   make device-list [STATUS=active]
 #   make -s device-issue DEVICE=netem-0001 > tokens.json   # token pair (uploader -refresh-token-file)
 #   TOKEN=$$(make -s device-token DEVICE=netem-0001 [TTL=24h])   # access JWT only (uploader -token)
@@ -84,19 +83,16 @@ DEVICECTL = $(COMPOSE) -f $(COMPOSE_FILE) exec -T server /devicectl
 device-require:
 	@test -n '$(DEVICE)' || { echo "set DEVICE=... (e.g. make device-token DEVICE=netem-0001)" >&2; exit 2; }
 
-## device-issue: allow-list and activate DEVICE, print a fresh token pair JSON.
+## device-issue: activate DEVICE (creating it if needed), print a fresh token pair JSON.
 device-issue: device-require
 	@$(DEVICECTL) issue -device '$(DEVICE)'
 
-## device-token: allow-list and activate DEVICE, print only an access JWT (TTL default: ACCESS_TOKEN_TTL).
+## device-token: activate DEVICE (creating it if needed), print only an access JWT (TTL default: ACCESS_TOKEN_TTL).
 device-token: device-require
 	@$(DEVICECTL) access-token -device '$(DEVICE)' $(if $(TTL),-ttl '$(TTL)')
 
 device-approve: device-require
 	@$(DEVICECTL) approve -device '$(DEVICE)'
-
-device-batch: device-require
-	@$(DEVICECTL) batch-import -device '$(DEVICE)'
 
 device-list:
 	@$(DEVICECTL) list $(if $(STATUS),-status '$(STATUS)')

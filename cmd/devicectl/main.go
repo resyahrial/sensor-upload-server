@@ -1,8 +1,6 @@
-// Command devicectl administers device registration (tables device_batch,
-// devices, refresh_tokens; docs/decisions.md "Decisions (JWT + refresh)"):
+// Command devicectl administers device registration (tables devices,
+// refresh_tokens; docs/decisions.md "Decisions (JWT + refresh)"):
 //
-//	devicectl batch-import -file ids.txt       # allow-list; "-" reads stdin
-//	devicectl batch-import -device netem-0001
 //	devicectl list [-status pending]
 //	devicectl approve -device netem-0001       # also reject, revoke
 //	devicectl issue -device netem-0001         # dev/ops: token pair JSON on stdout
@@ -48,7 +46,6 @@ const (
 // deviceStore is the subset of *db.Devices the commands use.
 type deviceStore interface {
 	deviceapi.Store
-	ImportBatch(ctx context.Context, ids []string) (int64, error)
 	List(ctx context.Context, status db.DeviceStatus) ([]db.Device, error)
 	SetStatus(ctx context.Context, id string, status db.DeviceStatus, now time.Time) error
 }
@@ -61,15 +58,11 @@ type deps struct {
 	open   opener
 	getenv func(string) string
 	now    func() time.Time
-	stdin  io.Reader
 	stdout io.Writer
 	stderr io.Writer
 }
 
 const usage = `usage:
-  devicectl batch-import [-file PATH] [-device ID]...
-                                  add device ids to the registration allow-list
-                                  (file: one id per line, # comments; - = stdin)
   devicectl list [-status pending|active|rejected|revoked]
                                   print devices (tab-separated: device_id, status,
                                   lat, lon, firmware, registered_at, last_seen_at)
@@ -77,11 +70,11 @@ const usage = `usage:
                                   register call receives tokens)
   devicectl reject -device ID     reject a registration (deletes its refresh tokens)
   devicectl revoke -device ID     revoke a device (deletes its refresh tokens)
-  devicectl issue -device ID      dev/ops: allow-list and activate ID, start a new
+  devicectl issue -device ID      dev/ops: activate ID (creating it if needed), start a new
                                   refresh token family (replacing any) and print
                                   the token pair JSON
   devicectl access-token -device ID [-ttl DURATION]
-                                  dev/experiments: allow-list and activate ID
+                                  dev/experiments: activate ID (creating it if needed)
                                   (not if rejected/revoked; refresh tokens are
                                   untouched) and print a signed access token
                                   (default ttl $ACCESS_TOKEN_TTL)
@@ -94,7 +87,6 @@ func main() {
 		open:   openDB(os.Getenv("DATABASE_URL")),
 		getenv: os.Getenv,
 		now:    time.Now,
-		stdin:  os.Stdin,
 		stdout: os.Stdout,
 		stderr: os.Stderr,
 	})
@@ -125,12 +117,6 @@ func openDB(url string) opener {
 	}
 }
 
-// stringList is a repeatable string flag.
-type stringList []string
-
-func (s *stringList) String() string     { return strings.Join(*s, ",") }
-func (s *stringList) Set(v string) error { *s = append(*s, v); return nil }
-
 func run(ctx context.Context, args []string, d deps) error {
 	if len(args) == 0 {
 		fmt.Fprintln(d.stderr, usage)
@@ -141,16 +127,11 @@ func run(ctx context.Context, args []string, d deps) error {
 	fs.SetOutput(d.stderr)
 	fs.Usage = func() { fmt.Fprintln(d.stderr, usage) }
 	var (
-		device  string
-		devices stringList
-		file    string
-		status  string
-		ttl     time.Duration
+		device string
+		status string
+		ttl    time.Duration
 	)
 	switch cmd {
-	case "batch-import":
-		fs.StringVar(&file, "file", "", "file with one device id per line (# comments; - = stdin)")
-		fs.Var(&devices, "device", "device id to import (repeatable)")
 	case "list":
 		fs.StringVar(&status, "status", "", "only devices with this status")
 	case "approve", "reject", "revoke", "issue":
@@ -171,21 +152,7 @@ func run(ctx context.Context, args []string, d deps) error {
 	if fs.NArg() > 0 {
 		return fmt.Errorf("unexpected arguments: %v", fs.Args())
 	}
-	switch cmd {
-	case "batch-import":
-		ids, err := batchIDs(file, devices, d.stdin)
-		if err != nil {
-			return err
-		}
-		return withStore(ctx, d, func(s deviceStore) error {
-			n, err := s.ImportBatch(ctx, ids)
-			if err != nil {
-				return err
-			}
-			fmt.Fprintf(d.stderr, "devicectl: %d device ids imported (%d new)\n", len(ids), n)
-			return nil
-		})
-	case "list":
+	if cmd == "list" {
 		if status != "" && !db.ValidDeviceStatus(db.DeviceStatus(status)) {
 			return fmt.Errorf("-status %q: must be pending, active, rejected or revoked", status)
 		}
@@ -228,52 +195,6 @@ func withStore(ctx context.Context, d deps, fn func(deviceStore) error) error {
 	}
 	defer closeStore()
 	return fn(s)
-}
-
-// batchIDs collects the ids of batch-import: the -device values and the
-// lines of file ("-" = stdin), without blanks and # comments.
-func batchIDs(file string, devices []string, stdin io.Reader) ([]string, error) {
-	if file == "" && len(devices) == 0 {
-		return nil, errors.New("batch-import needs -file or -device")
-	}
-	var ids []string
-	for _, id := range devices {
-		if !meta.ValidDeviceID(id) {
-			return nil, fmt.Errorf("-device %q is invalid: must match ^[a-z0-9][a-z0-9-]{2,63}$", id)
-		}
-		ids = append(ids, id)
-	}
-	if file == "" {
-		return ids, nil
-	}
-	r := stdin
-	if file != "-" {
-		f, err := os.Open(file)
-		if err != nil {
-			return nil, err
-		}
-		defer f.Close()
-		r = f
-	}
-	sc := bufio.NewScanner(r)
-	for line := 1; sc.Scan(); line++ {
-		text, _, _ := strings.Cut(sc.Text(), "#")
-		id := strings.TrimSpace(text)
-		if id == "" {
-			continue
-		}
-		if !meta.ValidDeviceID(id) {
-			return nil, fmt.Errorf("%s:%d: device id %q is invalid: must match ^[a-z0-9][a-z0-9-]{2,63}$", file, line, id)
-		}
-		ids = append(ids, id)
-	}
-	if err := sc.Err(); err != nil {
-		return nil, fmt.Errorf("read %s: %w", file, err)
-	}
-	if len(ids) == 0 {
-		return nil, fmt.Errorf("%s: no device ids", file)
-	}
-	return ids, nil
 }
 
 func printDevices(w io.Writer, devs []db.Device) error {
@@ -362,9 +283,6 @@ func issue(ctx context.Context, d deps, device string) error {
 		return err
 	}
 	return withStore(ctx, d, func(s deviceStore) error {
-		if _, err := s.ImportBatch(ctx, []string{device}); err != nil {
-			return err
-		}
 		res, err := deviceapi.Issue(ctx, deviceapi.IssueConfig{
 			Store: s, Issuer: env.issuer, IdleTTL: env.idleTTL, MaxAge: env.maxAge, Now: d.now(),
 		}, device)
@@ -392,11 +310,8 @@ func accessToken(ctx context.Context, d deps, device string, ttl time.Duration) 
 		ttl = env.accessTokenTTL
 	}
 	return withStore(ctx, d, func(s deviceStore) error {
-		// Like issue: allow-list and activate, so a fresh experiment device
-		// needs no registration (rejected/revoked devices are refused).
-		if _, err := s.ImportBatch(ctx, []string{device}); err != nil {
-			return err
-		}
+		// Like issue: activate, so a fresh experiment device needs no
+		// registration (rejected/revoked devices are refused).
 		if err := deviceapi.Activate(ctx, s, device, d.now()); err != nil {
 			return err
 		}

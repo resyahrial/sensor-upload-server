@@ -86,9 +86,6 @@ func (h *handler) register(w http.ResponseWriter, r *http.Request) result {
 	})
 	dev := req.DeviceID
 	switch {
-	case errors.Is(err, errNotAllowed):
-		writeError(w, http.StatusForbidden, CodeDeviceNotAllowed)
-		return result{code: http.StatusForbidden, metric: obs.RegisterNotAllowed, deviceID: dev}
 	case errors.Is(err, errNotActive):
 		writeError(w, http.StatusForbidden, CodeDeviceNotActive)
 		return result{code: http.StatusForbidden, metric: obs.RegisterNotActive, deviceID: dev}
@@ -115,7 +112,6 @@ func (h *handler) register(w http.ResponseWriter, r *http.Request) result {
 
 // decideRegister is the registration state machine on the locked state.
 //
-//   - not in the batch → errNotAllowed
 //   - no device row → create it pending
 //   - active, poll secret matches and the family is unused or missing →
 //     start a new family (a lost 200 can be collected again)
@@ -125,9 +121,6 @@ func (h *handler) register(w http.ResponseWriter, r *http.Request) result {
 //   - pending → refresh location/firmware, stay pending
 //   - rejected or revoked → errNotActive
 func (h *handler) decideRegister(s *db.DeviceState, req RegisterRequest, now time.Time) (registerOutcome, error) {
-	if !s.InBatch {
-		return registerOutcome{}, errNotAllowed
-	}
 	hash := auth.HashSecret(req.PollSecret)
 	d := s.Device
 	if d == nil {

@@ -26,7 +26,6 @@ const (
 	RegisterPending        = "pending"         // new or still pending: 202
 	RegisterReregistered   = "reregistered"    // active with expired family, back to pending: 202
 	RegisterIssued         = "issued"          // active: 200 token pair
-	RegisterNotAllowed     = "not_allowed"     // not in device_batch: 403
 	RegisterNotActive      = "not_active"      // rejected or revoked: 403
 	RegisterSecretMismatch = "secret_mismatch" // 409
 	RegisterInvalid        = "invalid"         // 400

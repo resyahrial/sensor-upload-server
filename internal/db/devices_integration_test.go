@@ -41,40 +41,19 @@ func newDeviceID(t *testing.T) string {
 	return "dbdev-" + hex.EncodeToString(randHash(t)[:6])
 }
 
-func TestDevicesImportBatch(t *testing.T) {
-	d := newDevices(t)
-	ctx := testCtx(t)
-	a, b := newDeviceID(t), newDeviceID(t)
-	n, err := d.ImportBatch(ctx, []string{a, b, a})
-	if err != nil || n != 2 {
-		t.Fatalf("ImportBatch = %d, %v; want 2", n, err)
-	}
-	if n, err = d.ImportBatch(ctx, []string{a}); err != nil || n != 0 {
-		t.Fatalf("re-import = %d, %v; want 0", n, err)
-	}
-	if n, err = d.ImportBatch(ctx, nil); err != nil || n != 0 {
-		t.Fatalf("empty import = %d, %v", n, err)
-	}
-}
-
 func TestDevicesUpdateLifecycle(t *testing.T) {
 	d := newDevices(t)
 	ctx := testCtx(t)
 	id := newDeviceID(t)
 	now := time.Now().UTC().Truncate(time.Microsecond)
 
-	// Not in batch: InBatch false, creating a row fails.
-	err := d.Update(ctx, id, func(s *DeviceState) error {
-		if s.InBatch || s.Device != nil || s.Family != nil {
+	// Unknown device: empty state, nothing written by a no-op callback.
+	if err := d.Update(ctx, id, func(s *DeviceState) error {
+		if s.Device != nil || s.Family != nil {
 			t.Fatalf("state = %+v", s)
 		}
-		s.Device = &Device{Status: DevicePending, RegisteredAt: now, LastSeenAt: now}
 		return nil
-	})
-	if !errors.Is(err, ErrNotInBatch) {
-		t.Fatalf("Update outside batch = %v, want ErrNotInBatch", err)
-	}
-	if _, err := d.ImportBatch(ctx, []string{id}); err != nil {
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := d.Get(ctx, id); !errors.Is(err, ErrDeviceNotFound) {
@@ -184,9 +163,6 @@ func TestDevicesListAndPrune(t *testing.T) {
 	ctx := testCtx(t)
 	now := time.Now().UTC()
 	pending, active := newDeviceID(t), newDeviceID(t)
-	if _, err := d.ImportBatch(ctx, []string{pending, active}); err != nil {
-		t.Fatal(err)
-	}
 	old, recent := randHash(t), randHash(t)
 	for _, id := range []string{pending, active} {
 		if err := d.Update(ctx, id, func(s *DeviceState) error {
@@ -242,14 +218,12 @@ func TestDevicesListAndPrune(t *testing.T) {
 }
 
 // TestDevicesUpdateSerializes: concurrent Updates of one device run one at
-// a time (the batch row lock), so read-modify-write never loses an update.
+// a time (the advisory lock), so read-modify-write never loses an update,
+// even when they race to create the row.
 func TestDevicesUpdateSerializes(t *testing.T) {
 	d := newDevices(t)
 	ctx := testCtx(t)
 	id := newDeviceID(t)
-	if _, err := d.ImportBatch(ctx, []string{id}); err != nil {
-		t.Fatal(err)
-	}
 	const n = 10
 	var wg sync.WaitGroup
 	errs := make(chan error, n)
