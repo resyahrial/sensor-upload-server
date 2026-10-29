@@ -37,6 +37,8 @@ var (
 	// ErrTooLarge is wrapped when the size exceeds the limit (413 / INVALID_ARGUMENT).
 	ErrTooLarge = errors.New("file too large")
 
+	// deviceIDRe is the canonical (lowercase) form; NormalizeDeviceID
+	// lowercases input first, so callers may send uppercase.
 	deviceIDRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{2,63}$`)
 	sha256Re   = regexp.MustCompile(`^[0-9a-f]{64}$`)
 )
@@ -78,7 +80,7 @@ type Rules struct {
 // captured_at future limit. The first failing field is reported.
 func (m Metadata) Validate(now time.Time, r Rules) error {
 	if !ValidDeviceID(m.DeviceID) {
-		return invalid(KeyDeviceID, "must match %s", deviceIDRe)
+		return invalid(KeyDeviceID, "must be %s", DeviceIDRule)
 	}
 	if !sha256Re.MatchString(m.SHA256) {
 		return invalid(KeySHA256, "must be 64 lowercase hex characters")
@@ -123,8 +125,25 @@ func validateFilename(name string) error {
 	return nil
 }
 
-// ValidDeviceID reports whether id matches ^[a-z0-9][a-z0-9-]{2,63}$.
+// DeviceIDRule describes a valid device id (before normalization) for
+// error messages.
+const DeviceIDRule = "3-64 letters, digits or hyphens, starting with a letter or digit (case-insensitive)"
+
+// ValidDeviceID reports whether id is a canonical device id, i.e. matches
+// ^[a-z0-9][a-z0-9-]{2,63}$. Normalize input with NormalizeDeviceID first.
 func ValidDeviceID(id string) bool { return deviceIDRe.MatchString(id) }
+
+// NormalizeDeviceID returns id with ASCII A-Z lowercased: "WIH-001" and
+// "wih-001" are the same device. Only ASCII is mapped, so no non-ASCII
+// input (such as the Kelvin sign) can normalize into a valid id.
+func NormalizeDeviceID(id string) string {
+	return strings.Map(func(r rune) rune {
+		if 'A' <= r && r <= 'Z' {
+			return r + ('a' - 'A')
+		}
+		return r
+	}, id)
+}
 
 // ParseCapturedAt parses an RFC 3339 timestamp with a UTC offset ("Z" or ±hh:mm).
 func ParseCapturedAt(s string) (time.Time, error) {
@@ -165,7 +184,7 @@ func FromTus(pairs map[string]string, size int64) (Metadata, error) {
 		return Metadata{}, err
 	}
 	return Metadata{
-		DeviceID:    pairs[KeyDeviceID],
+		DeviceID:    NormalizeDeviceID(pairs[KeyDeviceID]),
 		SHA256:      pairs[KeySHA256],
 		Filename:    pairs[KeyFilename],
 		ContentType: pairs[KeyContentType],

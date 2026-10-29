@@ -21,6 +21,13 @@ const (
 	LookupError    = "error"
 )
 
+// Results for Metrics.FileLists (GET /files).
+const (
+	ListOK      = "ok"
+	ListInvalid = "invalid"
+	ListError   = "error"
+)
+
 // Results for Metrics.DeviceRegister (POST /v1/devices/register).
 const (
 	RegisterPending        = "pending"         // new or still pending: 202
@@ -69,6 +76,9 @@ type Metrics struct {
 	// FileLookups counts GET /files/sha256/{sha256} requests, labelled by
 	// result (one of the Lookup* constants).
 	FileLookups *prometheus.CounterVec
+	// FileLists counts GET /files requests, labelled by result (one of
+	// the List* constants).
+	FileLists *prometheus.CounterVec
 	// RetentionDeleted counts completed uploads (object and row) deleted
 	// by retention, labelled by reason (RetentionAge, RetentionDisk).
 	RetentionDeleted *prometheus.CounterVec
@@ -130,6 +140,9 @@ func NewMetrics(reg prometheus.Registerer) (*Metrics, error) {
 		FileLookups: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "file_lookups_total", Help: "Public \"is this file saved?\" lookups by sha256, by result.",
 		}, []string{"result"}),
+		FileLists: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "file_lists_total", Help: "Public listings of completed uploads (GET /files), by result.",
+		}, []string{"result"}),
 		RetentionDeleted: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "uploads_retention_deleted_total", Help: "Completed uploads deleted by retention (object and row), by reason (age, disk).",
 		}, []string{"reason"}),
@@ -146,7 +159,7 @@ func NewMetrics(reg prometheus.Registerer) (*Metrics, error) {
 	for _, c := range []prometheus.Collector{
 		m.Started, m.Completed, m.Failed, m.Resumes, m.BytesReceived,
 		m.ChunkBytes, m.Duration, m.FinalizeDuration, m.InProgress, m.GRPCStreamResets,
-		m.StagingOrphans, m.FileLookups, m.RetentionDeleted, m.DeviceRegister, m.TokenRefresh, m.DiskUsedRatio,
+		m.StagingOrphans, m.FileLookups, m.FileLists, m.RetentionDeleted, m.DeviceRegister, m.TokenRefresh, m.DiskUsedRatio,
 	} {
 		if err := reg.Register(c); err != nil {
 			return nil, err

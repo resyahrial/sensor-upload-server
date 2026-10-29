@@ -147,6 +147,12 @@ func TestFromTus(t *testing.T) {
 			t.Errorf("missing %s: %v", key, err)
 		}
 	}
+	p := tusPairs()
+	p[KeyDeviceID] = "BioAC-0142"
+	if m, err := FromTus(p, 10); err != nil || m.DeviceID != "bioac-0142" {
+		t.Errorf("uppercase device_id: %q, %v; want bioac-0142", m.DeviceID, err)
+	}
+
 	for key, bad := range map[string]string{KeyCapturedAt: "yesterday", KeyPriority: "high"} {
 		p := tusPairs()
 		p[key] = bad
@@ -249,5 +255,22 @@ func TestExtensionAndFinalKey(t *testing.T) {
 	m.ContentType = "video/quicktime"
 	if got, want := FinalKey(m), "bioac-0142/2027/01/02/"+sha+".mov"; got != want {
 		t.Errorf("FinalKey = %q, want %q", got, want)
+	}
+}
+
+func TestNormalizeDeviceID(t *testing.T) {
+	for in, want := range map[string]string{
+		"WIH-001":       "wih-001",
+		"wih-001":       "wih-001",
+		"Bio-AC9":       "bio-ac9",
+		"bio_AC":        "bio_ac",        // still invalid: underscore
+		"\u212Aelvin-1": "\u212Aelvin-1", // Kelvin sign is not ASCII: left alone
+	} {
+		if got := NormalizeDeviceID(in); got != want {
+			t.Errorf("NormalizeDeviceID(%q) = %q, want %q", in, got, want)
+		}
+	}
+	if ValidDeviceID(NormalizeDeviceID("\u212Aelvin-1")) {
+		t.Error("Kelvin sign normalized into a valid id")
 	}
 }

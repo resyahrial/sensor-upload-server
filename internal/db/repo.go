@@ -133,6 +133,46 @@ func (r *Repo) ListCompleted(ctx context.Context, minAge time.Duration, limit in
 		ORDER BY completed_at, id LIMIT $2`, minAge.Microseconds(), limit)
 }
 
+// ListFilter selects completed uploads for ListCompletedPage. Empty
+// fields match everything.
+type ListFilter struct {
+	DeviceID          string
+	ContentType       string // exact match
+	ContentTypePrefix string // e.g. "image/"
+	// After continues a listing: only rows after this one in the
+	// newest-first order (by completed_at, then id) are returned.
+	After *ListCursor
+	Limit int
+}
+
+// ListCursor is the position of a row in the ListCompletedPage order.
+type ListCursor struct {
+	CompletedAt time.Time
+	ID          uuid.UUID
+}
+
+// ListCompletedPage returns up to f.Limit completed uploads matching f,
+// newest first (completed_at DESC, id DESC).
+func (r *Repo) ListCompletedPage(ctx context.Context, f ListFilter) ([]Upload, error) {
+	if f.Limit <= 0 {
+		return nil, fmt.Errorf("list completed page: limit must be positive, got %d", f.Limit)
+	}
+	var afterAt *time.Time
+	var afterID *uuid.UUID
+	if f.After != nil {
+		afterAt, afterID = &f.After.CompletedAt, &f.After.ID
+	}
+	return r.many(ctx, "list completed page", `
+		SELECT `+uploadColumns+` FROM uploads
+		WHERE status = 'completed'
+		  AND ($1 = '' OR device_id = $1)
+		  AND ($2 = '' OR content_type = $2)
+		  AND ($3 = '' OR starts_with(content_type, $3))
+		  AND ($4::timestamptz IS NULL OR (completed_at, id) < ($4, $5::uuid))
+		ORDER BY completed_at DESC, id DESC LIMIT $6`,
+		f.DeviceID, f.ContentType, f.ContentTypePrefix, afterAt, afterID, f.Limit)
+}
+
 // DeleteCompleted deletes the completed row id and, inside the same
 // transaction, calls deleteObject with its storage key; the delete is
 // committed only if deleteObject succeeds (it must treat a missing object

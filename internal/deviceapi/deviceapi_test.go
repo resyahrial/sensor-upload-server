@@ -193,6 +193,19 @@ func TestPruneRetired(t *testing.T) {
 	}
 }
 
+func TestRegisterLowercasesDeviceID(t *testing.T) {
+	store := newFakeStore()
+	e := newEnv(t, store, 0)
+	secret := newSecret(t)
+	wantPending(t, e.register("WIH-001", secret))
+	if d := store.device("wih-001"); d.Status != db.DevicePending {
+		t.Fatalf("wih-001 = %+v, want pending", d)
+	}
+	// Any spelling is the same device: same secret stays pending.
+	wantPending(t, e.register("Wih-001", secret))
+	wantError(t, e.register("wih-001", newSecret(t)), http.StatusConflict, CodePollSecretMismatch)
+}
+
 func TestRegisterUpdatesPendingLocation(t *testing.T) {
 	store := newFakeStore()
 	e := newEnv(t, store, 0)

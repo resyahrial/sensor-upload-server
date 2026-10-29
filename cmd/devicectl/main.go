@@ -164,8 +164,8 @@ func run(ctx context.Context, args []string, d deps) error {
 			return printDevices(d.stdout, devs)
 		})
 	}
-	if !meta.ValidDeviceID(device) {
-		return fmt.Errorf("-device %q is invalid: must match ^[a-z0-9][a-z0-9-]{2,63}$", device)
+	if device = meta.NormalizeDeviceID(device); !meta.ValidDeviceID(device) {
+		return fmt.Errorf("-device %q is invalid: must be %s", device, meta.DeviceIDRule)
 	}
 	switch cmd {
 	case "approve", "reject", "revoke":

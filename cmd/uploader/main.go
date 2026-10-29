@@ -21,6 +21,7 @@ import (
 
 	"github.com/resyahrial/sensor-upload-server/internal/auth"
 	"github.com/resyahrial/sensor-upload-server/internal/client"
+	"github.com/resyahrial/sensor-upload-server/internal/meta"
 )
 
 func main() {
@@ -89,6 +90,8 @@ func parseFlags(args []string, stderr io.Writer) (options, error) {
 	} else if o.cfg.Token == "" {
 		return o, errors.New("-token (or $UPLOADER_TOKEN) or -refresh-token-file is required")
 	}
+	// The server lowercases device ids, and tokens carry the lowercase form.
+	o.cfg.Device = meta.NormalizeDeviceID(o.cfg.Device)
 	if o.cfg.Device == "" && o.cfg.Token != "" {
 		d, err := auth.DeviceFromToken(o.cfg.Token)
 		if err != nil {

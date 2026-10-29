@@ -209,7 +209,8 @@ cmd_device() {
 	case $cmd in
 	approve | reject | revoke | issue | access-token)
 		# Same rule as metadata device_id; also keeps the remote command safe.
-		[[ $dev =~ ^[a-z0-9][a-z0-9-]{2,63}$ ]] || die "DEVICE='$dev' must match ^[a-z0-9][a-z0-9-]{2,63}$"
+		# devicectl lowercases it.
+		[[ $dev =~ ^[A-Za-z0-9][A-Za-z0-9-]{2,63}$ ]] || die "DEVICE='$dev' must match ^[A-Za-z0-9][A-Za-z0-9-]{2,63}$"
 		args="-device $dev"
 		if [[ $cmd == access-token && -n $ttl ]]; then
 			[[ $ttl =~ ^[0-9]+(ns|us|ms|s|m|h)([0-9]+(ns|us|ms|s|m|h))*$ ]] || die "TTL='$ttl' is not a Go duration (e.g. 24h)"

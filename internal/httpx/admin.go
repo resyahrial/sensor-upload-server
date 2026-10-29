@@ -65,7 +65,15 @@ func AdminHandler(g prometheus.Gatherer, checks []Check, checkTimeout time.Durat
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
-	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("GET /readyz", ReadyHandler(checks, checkTimeout, log))
+	return mux
+}
+
+// ReadyHandler serves /readyz: 200 only if every check passes within
+// checkTimeout, else 503. The body reports only "ok" or "fail" per check
+// (see AdminHandler), so it is also safe on the public listener.
+func ReadyHandler(checks []Check, checkTimeout time.Duration, log *slog.Logger) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), checkTimeout)
 		defer cancel()
 		results, ok := runChecks(ctx, checks, log)
@@ -75,7 +83,6 @@ func AdminHandler(g prometheus.Gatherer, checks []Check, checkTimeout time.Durat
 		}
 		writeJSON(w, code, map[string]any{"status": status, "checks": results})
 	})
-	return mux
 }
 
 // runChecks runs checks concurrently and returns each one's result (checkOK

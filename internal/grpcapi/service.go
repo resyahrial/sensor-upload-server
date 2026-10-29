@@ -198,7 +198,7 @@ func (s *Service) metadata(req *uploadv1.InitRequest) (meta.Metadata, error) {
 		return meta.Metadata{}, err
 	}
 	m := meta.Metadata{
-		DeviceID:    req.GetDeviceId(),
+		DeviceID:    meta.NormalizeDeviceID(req.GetDeviceId()),
 		SHA256:      req.GetSha256(),
 		Filename:    req.GetFilename(),
 		ContentType: req.GetContentType(),

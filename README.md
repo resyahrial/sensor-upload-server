@@ -9,6 +9,8 @@ protocols with the same rules:
 | `/rest-http3/files/` | tus 1.0 | HTTP/3 over QUIC (UDP, same port as TCP) |
 | `/grpc/upload.v1.UploadService/*` | gRPC (`Init`, `Upload` bidi stream, `Status`, `Cancel`) | HTTP/2 over the TLS TCP listener (`/grpc` prefix stripped), plus an optional native gRPC listener |
 | `GET /files/sha256/{sha256}` | "Is this file saved?" lookup, JSON, **no authentication** | HTTPS (HTTP/1.1, HTTP/2) and HTTP/3, same port |
+| `GET /files` | List of completed uploads, newest first, JSON, **no authentication** | HTTPS (HTTP/1.1, HTTP/2) and HTTP/3, same port |
+| `GET /readyz` | Readiness (same as the admin `/readyz`), **no authentication** | HTTPS (HTTP/1.1, HTTP/2), same port |
 
 Every protocol only receives bytes into a staging area. One shared
 **finalizer** verifies the SHA-256, deduplicates by sha256, moves the file to
@@ -25,6 +27,8 @@ Features at a glance:
   ([Authentication](#authentication)).
 - **File lookup** `GET /files/sha256/{sha256}`: "is this file saved?",
   no token ([File lookup](#file-lookup-get-filessha256sha256)).
+- **File list** `GET /files`: completed uploads, filterable by device and
+  content type, no token ([File list](#file-list-get-files)).
 - **Storage**: staging while uploading, then the object store under
   `{device_id}/{yyyy}/{mm}/{dd}/{sha256}{ext}` ([Where files are stored](#where-files-are-stored)).
 - **Retention and disk-pressure cleanup**: completed files are deleted after
@@ -45,7 +49,9 @@ evidence in [`docs/acceptance.md`](docs/acceptance.md).
 ```
 TLS TCP :8443 ── router ── /rest/files/*        → tusd handler ─┐
                         ├─ /grpc/* (gRPC, strip) → UploadService ┤
-                        └─ GET /files/sha256/{h} → file lookup (also on QUIC; reads Postgres)
+                        ├─ GET /files/sha256/{h} → file lookup (also on QUIC; reads Postgres)
+                        ├─ GET /files            → file list (also on QUIC; reads Postgres)
+                        └─ GET /readyz           → readiness (same checks as admin)
 QUIC UDP :8443 ─────────── /rest-http3/files/*  → tusd handler ─┤──→ staging (STAGING_DIR)
 native gRPC :9090 ───────── bare + /grpc paths  → UploadService ┘        │
                                                                     finalizer
@@ -178,7 +184,7 @@ The token pair has the same shape from register, refresh and `devicectl issue`:
 Error bodies are `{"error":"<code>"}`.
 
 - **Registration.** Any device may register with a valid device id
-  (`^[a-z0-9][a-z0-9-]{2,63}$`). The first call creates the device as
+  (3-64 letters, digits or hyphens, starting with a letter or digit; case-insensitive (the server lowercases it, so `WIH-001` and `wih-001` are the same device)). The first call creates the device as
   `pending` and stores the poll secret's hash; ops see it in
   `devicectl list -status pending` and approve or reject it. After `devicectl approve`, the same poll secret
   collects the pair, again and again until the refresh token is first used
@@ -208,7 +214,8 @@ No database lookup per upload request:
    `*.pem` in `JWT_VERIFY_KEYS_DIR`. Unknown `kid` → rejected.
 3. Check the signature, `iss` = `JWT_ISSUER`, `aud` contains `sensor-upload`,
    `exp` (required), `iat` not in the future, with 120 s leeway. `sub` must be
-   a valid device_id (`^[a-z0-9][a-z0-9-]{2,63}$`).
+   a valid (lowercase) device_id (`^[a-z0-9][a-z0-9-]{2,63}$`; tokens are
+   always issued for the lowercased id).
 4. The token's device must equal the upload metadata `device_id`
    (create / `Init`), and only the owning device can see or touch an upload.
 
@@ -309,6 +316,31 @@ or `-k` for an IP-only self-signed certificate you do not have):
 ```sh
 curl -s --cacert certs/server.crt https://<host>:<port>/files/sha256/<hex>
 ```
+
+## File list (`GET /files`)
+
+Lists **completed** uploads, newest first (by `completed_at`), without a
+token. In-progress, failed, cancelled and expired uploads are never listed,
+and neither are storage keys or upload refs.
+
+| Query | Meaning |
+|---|---|
+| `device_id` | Only this device (case-insensitive, like everywhere) |
+| `content_type` | Exact type (`image/jpeg`) or a prefix ending in `*` (`image/*`) |
+| `limit` | 1-200, default 50 |
+| `cursor` | `next_cursor` of the previous page |
+
+```sh
+curl -s --cacert certs/server.crt 'https://<host>:<port>/files?device_id=WIH-001&content_type=image/*&limit=2'
+# {"files":[{"device_id":"wih-001","sha256":"…","filename":"20261021_0530.jpg",
+#   "content_type":"image/jpeg","size":48213,"captured_at":"2026-10-20T22:30:00Z",
+#   "completed_at":"2026-10-20T22:31:04Z"}, …],"next_cursor":"MTc2…"}
+```
+
+`next_cursor` is absent on the last page. A bad parameter → `400`
+`{"error":"…"}`; database error → `500`. Metric
+`file_lists_total{result="ok|invalid|error"}`, one `file list` log line per
+request.
 
 **Security:** the endpoint is unauthenticated by design. It discloses only
 whether a file with a given sha256 is stored (plus its size and completion
@@ -648,7 +680,7 @@ sudo BEHIND_PROXY=true deploy/vps/server-deploy.sh
 Clients then use the proxy's URL and certificate (not `ca.crt`). Proxy-side
 requirements:
 
-- **tus** (`/rest/files/*`, `/v1/devices/*`, `/files/sha256/*`): HTTP
+- **tus** (`/rest/files/*`, `/v1/devices/*`, `/files/sha256/*`, `/files`, `/readyz`): HTTP
   upstream; keep the `Host` header (or send `X-Forwarded-Host`) and send
   `X-Forwarded-Proto: https`. Allow `PATCH`, `HEAD`, `DELETE` and the
   `Tus-Resumable`, `Upload-*` headers, a body size of at least the client's
@@ -750,8 +782,9 @@ clients, and a new `jwt.key` invalidates every outstanding access token.
   port and the MinIO console are bound to `127.0.0.1` (use `make vps-tunnel`),
   and Postgres and MinIO S3 are not published at all. Keep it that way when
   adding `ports:`.
-- **`GET /files/sha256/{sha256}` has no auth**: anyone who can reach the
-  server can ask whether a file with a given hash exists. Accept that on a test
+- **`GET /files/sha256/{sha256}` and `GET /files` have no auth**: anyone who
+  can reach the server can ask whether a file with a given hash exists, and
+  list every completed upload's device id, filename, type, size and times. Accept that on a test
   server, or restrict 443/9090 to known client IPs with your provider's
   firewall.
 - The docker group is root-equivalent on the VPS. `server.key` is mode 640 with
@@ -909,6 +942,11 @@ Differences from `sensor-upload-integration.md` and the requirements:
   It reveals whether a file with a given hash is stored (and its size and
   completion time), nothing else. Each request is one indexed Postgres
   lookup, so a flood costs DB connections.
+- **`GET /files` is unauthenticated and not rate limited.** It discloses
+  every completed upload's device id, filename, content type, size and
+  times (not the file contents or storage key). Each request is one indexed
+  query of at most 201 rows. `GET /readyz` is public too and runs the
+  Postgres, staging and object store checks per request.
 - **Retention deletes for good.** Completed files are deleted after
   `RETENTION_MAX_AGE`, or earlier under disk pressure (oldest first); there is
   no archive. With `OBJSTORE=s3` on a remote bucket, set `DISK_PATH` to a disk

@@ -137,7 +137,7 @@ Every upload carries these fields (tus: `Upload-Metadata`; gRPC: `InitRequest`).
 
 | Field | Rule |
 |---|---|
-| `device_id` | Required; `^[a-z0-9][a-z0-9-]{2,63}$`; must equal JWT `device_id` claim |
+| `device_id` | Required; `^[A-Za-z0-9][A-Za-z0-9-]{2,63}$`, lowercased by the server; must equal JWT `device_id` claim |
 | `sha256` | Required; 64 lowercase hex chars |
 | `filename` | Required; 1–255 chars; no `/` or `\`; stored as-is, never used as a path |
 | `content_type` | Required; must be in the allow-list (FR-1a) |

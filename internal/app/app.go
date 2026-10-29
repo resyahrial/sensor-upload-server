@@ -187,6 +187,8 @@ func New(ctx context.Context, opts Options) (_ *App, err error) {
 
 	// Public and unauthenticated (see docs/decisions.md "verify endpoint").
 	files := fileapi.NewHandler(fileapi.Config{Repo: repo, Metrics: metrics, Log: log})
+	// Public and unauthenticated listing of completed uploads (GET /files).
+	fileList := fileapi.NewListHandler(fileapi.ListConfig{Repo: repo, Metrics: metrics, Log: log})
 	// Device registration and token refresh (unauthenticated JSON).
 	devices, err := deviceapi.NewHandler(deviceapi.Config{
 		Store:       db.NewDevices(pool),
@@ -201,10 +203,18 @@ func New(ctx context.Context, opts Options) (_ *App, err error) {
 	if err != nil {
 		return nil, err
 	}
+	checks := []httpx.Check{
+		{Name: "postgres", Checker: pool},
+		{Name: "staging", Checker: httpx.DirWritable(cfg.StagingDir)},
+		{Name: "objstore", Checker: store},
+	}
 	routes := httpx.RouterConfig{
-		REST:    restTus,
-		Files:   files,
-		Devices: devices,
+		REST:     restTus,
+		Files:    files,
+		FileList: fileList,
+		Devices:  devices,
+		// Public too, for probes that only reach the public port.
+		Ready: httpx.ReadyHandler(checks, readyCheckTimeout, log),
 		// The router strips "/grpc" itself, so the grpc.Server goes here
 		// without grpcapi.PrefixHandler (which would strip a second time),
 		// behind the read-ahead limit that ServeHTTP lacks.
@@ -228,7 +238,7 @@ func New(ctx context.Context, opts Options) (_ *App, err error) {
 	a.bound = append(a.bound, a.public)
 	if tlsCfg != nil {
 		port := strconv.Itoa(a.public.Addr().(*net.TCPAddr).Port)
-		if err := a.listenH3(cfg, tlsCfg, port, h3Tus, files); err != nil {
+		if err := a.listenH3(cfg, tlsCfg, port, h3Tus, files, fileList); err != nil {
 			return nil, err
 		}
 		routes.AltSvc = httpx.AltSvcH3(port)
@@ -242,11 +252,6 @@ func New(ctx context.Context, opts Options) (_ *App, err error) {
 		a.bound = append(a.bound, a.native)
 	}
 
-	checks := []httpx.Check{
-		{Name: "postgres", Checker: pool},
-		{Name: "staging", Checker: httpx.DirWritable(cfg.StagingDir)},
-		{Name: "objstore", Checker: store},
-	}
 	a.admin, err = httpx.Listen(httpx.ServerConfig{
 		Name:    "admin",
 		Addr:    cfg.MetricsAddr,
@@ -259,10 +264,11 @@ func New(ctx context.Context, opts Options) (_ *App, err error) {
 }
 
 // listenH3 binds the HTTP/3 listener on the public TCP listener's port.
-func (a *App) listenH3(cfg config.Config, tlsCfg *tls.Config, port string, h3Tus, files http.Handler) error {
+func (a *App) listenH3(cfg config.Config, tlsCfg *tls.Config, port string, h3Tus, files, fileList http.Handler) error {
 	h3mux := http.NewServeMux()
 	h3mux.Handle(tusapi.BasePathRESTHTTP3, h3Tus)
 	h3mux.Handle(httpx.PrefixFiles, files)
+	h3mux.Handle("GET "+httpx.PathFiles, fileList)
 	host, _, err := net.SplitHostPort(cfg.ListenAddr)
 	if err != nil {
 		return fmt.Errorf("LISTEN_ADDR: %w", err)

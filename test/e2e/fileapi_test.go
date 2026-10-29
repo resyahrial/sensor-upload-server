@@ -3,12 +3,17 @@
 package e2e
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/resyahrial/sensor-upload-server/internal/auth"
+	"github.com/resyahrial/sensor-upload-server/internal/db"
+	"github.com/resyahrial/sensor-upload-server/internal/deviceapi"
 	"github.com/resyahrial/sensor-upload-server/internal/fileapi"
 )
 
@@ -77,5 +82,54 @@ func TestFileLookup(t *testing.T) {
 	_ = res.Body.Close()
 	if res.StatusCode != http.StatusBadRequest {
 		t.Errorf("invalid sha: %d", res.StatusCode)
+	}
+}
+
+// TestFileListAndReady registers with an uppercase device id (the same
+// device as its lowercase form), uploads, and lists the upload through the
+// public GET /files; GET /readyz answers on the public port too.
+func TestFileListAndReady(t *testing.T) {
+	s := StartServer(t, nil)
+	dev := device()
+	secret, _ := auth.GenerateSecret()
+	reg := map[string]any{"device_id": strings.ToUpper(dev), "poll_secret": secret}
+	if code, e := postJSON(t, s, "/v1/devices/register", reg, nil); code != http.StatusAccepted {
+		t.Fatalf("register: %d %q", code, e)
+	}
+	if err := devicesDB(t, s).SetStatus(context.Background(), dev, db.DeviceActive, time.Now()); err != nil {
+		t.Fatalf("approve lowercase %s: %v", dev, err)
+	}
+	var pair deviceapi.TokenResponse
+	if code, e := postJSON(t, s, "/v1/devices/register", reg, &pair); code != http.StatusOK || pair.DeviceID != dev {
+		t.Fatalf("collect: %d %q %+v", code, e, pair)
+	}
+	uploadWith(t, s, dev, pair.AccessToken)
+
+	hc := NewClient(t, H2)
+	get := func(path string, out any) int {
+		t.Helper()
+		res, err := hc.Get(s.URL() + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer res.Body.Close()
+		if err := json.NewDecoder(res.Body).Decode(out); err != nil {
+			t.Fatalf("%s: %v", path, err)
+		}
+		return res.StatusCode
+	}
+	var list fileapi.ListResponse
+	if code := get("/files?device_id="+strings.ToUpper(dev)+"&content_type=audio/*", &list); code != http.StatusOK {
+		t.Fatalf("list: %d", code)
+	}
+	if len(list.Files) != 1 || list.Files[0].DeviceID != dev || list.Files[0].Size != 3000 {
+		t.Fatalf("list = %+v", list)
+	}
+	var ready struct {
+		Status string            `json:"status"`
+		Checks map[string]string `json:"checks"`
+	}
+	if code := get("/readyz", &ready); code != http.StatusOK || ready.Status != "ok" || ready.Checks["postgres"] != "ok" {
+		t.Fatalf("readyz: %d %+v", code, ready)
 	}
 }

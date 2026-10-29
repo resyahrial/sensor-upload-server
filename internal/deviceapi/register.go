@@ -71,6 +71,7 @@ func (h *handler) register(w http.ResponseWriter, r *http.Request) result {
 	var req RegisterRequest
 	err := decode(w, r, &req)
 	if err == nil {
+		req.DeviceID = meta.NormalizeDeviceID(req.DeviceID)
 		err = req.validate()
 	}
 	if err != nil {

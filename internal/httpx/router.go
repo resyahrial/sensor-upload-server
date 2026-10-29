@@ -13,10 +13,15 @@ const (
 	// PrefixFiles is the public, unauthenticated file lookup
 	// (GET /files/sha256/{sha256}, internal/fileapi).
 	PrefixFiles = "/files/sha256/"
+	// PathFiles is the public listing of completed uploads (GET /files,
+	// internal/fileapi).
+	PathFiles = "/files"
 	// PrefixDevices is device registration and token refresh
 	// (POST /v1/devices/register, POST /v1/devices/token/refresh,
 	// internal/deviceapi).
 	PrefixDevices = "/v1/devices/"
+	// PathReady is the public readiness probe (same as the admin /readyz).
+	PathReady = "/readyz"
 )
 
 // RouterConfig configures the public TLS TCP router.
@@ -33,6 +38,11 @@ type RouterConfig struct {
 	Files http.Handler
 	// Devices, when non-nil, serves /v1/devices/ (mounted as-is).
 	Devices http.Handler
+	// FileList, when non-nil, serves GET /files (the completed upload
+	// listing, internal/fileapi).
+	FileList http.Handler
+	// Ready, when non-nil, serves GET /readyz.
+	Ready http.Handler
 	// AltSvc is the Alt-Svc header value advertising HTTP/3, e.g.
 	// `h3=":8443"`; empty = no header.
 	AltSvc string
@@ -41,7 +51,8 @@ type RouterConfig struct {
 // NewRouter returns the TCP listener's handler: /rest/files/ → tus,
 // /rest-http3/* → 404 (that endpoint is HTTP/3 only, so misrouted clients
 // fail loudly), /grpc/ → gRPC (if configured), /files/sha256/ → file
-// lookup (if configured), everything else 404. Every
+// lookup (if configured), GET /files → upload listing and GET /readyz →
+// readiness (if configured), everything else 404. Every
 // response carries Alt-Svc.
 func NewRouter(cfg RouterConfig) http.Handler {
 	mux := http.NewServeMux()
@@ -54,6 +65,12 @@ func NewRouter(cfg RouterConfig) http.Handler {
 	}
 	if cfg.Devices != nil {
 		mux.Handle(PrefixDevices, cfg.Devices)
+	}
+	if cfg.FileList != nil {
+		mux.Handle("GET "+PathFiles, cfg.FileList)
+	}
+	if cfg.Ready != nil {
+		mux.Handle("GET "+PathReady, cfg.Ready)
 	}
 	var grpc http.Handler
 	if cfg.GRPC != nil {

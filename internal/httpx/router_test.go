@@ -33,10 +33,14 @@ func TestRouter(t *testing.T) {
 		{"files root is not rest", false, http.MethodGet, "/files/", "", 404, ""},
 		{"rest files not lookup", false, http.MethodGet, "/rest/files/sha256/abc", "", 200, "rest /rest/files/sha256/abc"},
 		{"files with grpc content type", true, http.MethodPost, "/files/sha256/abc", "application/grpc", 200, "files /files/sha256/abc"},
+		{"file list", false, http.MethodGet, "/files", "", 200, "list /files"},
+		{"file list post", false, http.MethodPost, "/files", "", 405, ""},
+		{"readyz", false, http.MethodGet, "/readyz", "", 200, "ready /readyz"},
+		{"readyz post", false, http.MethodPost, "/readyz", "", 405, ""},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg := RouterConfig{REST: echo("rest"), Files: echo("files"), AltSvc: AltSvcH3("8443")}
+			cfg := RouterConfig{REST: echo("rest"), Files: echo("files"), FileList: echo("list"), Ready: echo("ready"), AltSvc: AltSvcH3("8443")}
 			if tc.grpc {
 				cfg.GRPC = echo("grpc")
 			}

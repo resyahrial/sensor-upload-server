@@ -119,7 +119,7 @@ The sensor repeats the same request to poll until ops decides. No `Authorization
 
 - `expires_in` is the access token's lifetime in seconds. `refresh_expires_at` is the latest moment the refresh token can work (365 days after registration); it stops earlier if unused for 90 days.
 - If the `200` response is lost, poll again with the same poll secret: the platform returns a token pair again, until the refresh token is used for the first time. After that the poll secret is cleared and no longer works.
-- Any device ID matching `^[a-z0-9][a-z0-9-]{2,63}$` (lowercase only) can register. The platform keeps the poll secret's hash from the first call, and shows ops the device ID, location and time before approving.
+- Any device ID of 3-64 letters, digits or hyphens (starting with a letter or digit) can register. It is case-insensitive: the platform lowercases it, so `WIH-001` and `wih-001` are the same device, and tokens and listings show the lowercase form. The platform keeps the poll secret's hash from the first call, and shows ops the device ID, location and time before approving.
 
 **Registering again:** when the refresh token has expired (`invalid_grant`, section 3), generate a **new** poll secret and register again. The device goes back to pending and ops approves it again.
 
