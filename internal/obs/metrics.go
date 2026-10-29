@@ -51,6 +51,17 @@ const (
 	RefreshError        = "error"         // 503
 )
 
+// Results for Metrics.DeviceApprove (POST /v1/devices/approve).
+const (
+	ApproveApproved      = "approved"       // pending → active: 200
+	ApproveAlreadyActive = "already_active" // no-op: 200
+	ApproveNotFound      = "not_found"      // never registered: 404
+	ApproveNotActive     = "not_active"     // rejected or revoked: 403
+	ApproveInvalid       = "invalid"        // 400
+	ApproveRateLimited   = "rate_limited"   // 429
+	ApproveError         = "error"          // 503
+)
+
 // Reasons for Metrics.RetentionDeleted.
 const (
 	RetentionAge  = "age"  // completed longer than RETENTION_MAX_AGE ago
@@ -88,6 +99,9 @@ type Metrics struct {
 	// TokenRefresh counts refresh token requests, by result (Refresh*
 	// constants); result "reuse" is a security event.
 	TokenRefresh *prometheus.CounterVec
+	// DeviceApprove counts public approve requests, by result (Approve*
+	// constants).
+	DeviceApprove *prometheus.CounterVec
 	// DiskUsedRatio is the used fraction (0..1) of DISK_PATH's
 	// filesystem at the last disk check.
 	DiskUsedRatio prometheus.Gauge
@@ -152,6 +166,9 @@ func NewMetrics(reg prometheus.Registerer) (*Metrics, error) {
 		TokenRefresh: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "token_refresh_total", Help: "Refresh token requests, by result (reuse = rotated-out token presented again).",
 		}, []string{"result"}),
+		DeviceApprove: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "device_approve_total", Help: "Public device approve requests, by result.",
+		}, []string{"result"}),
 		DiskUsedRatio: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "disk_used_ratio", Help: "Used fraction of the DISK_PATH filesystem (as df: used / (used + available)) at the last check.",
 		}),
@@ -159,7 +176,7 @@ func NewMetrics(reg prometheus.Registerer) (*Metrics, error) {
 	for _, c := range []prometheus.Collector{
 		m.Started, m.Completed, m.Failed, m.Resumes, m.BytesReceived,
 		m.ChunkBytes, m.Duration, m.FinalizeDuration, m.InProgress, m.GRPCStreamResets,
-		m.StagingOrphans, m.FileLookups, m.FileLists, m.RetentionDeleted, m.DeviceRegister, m.TokenRefresh, m.DiskUsedRatio,
+		m.StagingOrphans, m.FileLookups, m.FileLists, m.RetentionDeleted, m.DeviceRegister, m.TokenRefresh, m.DeviceApprove, m.DiskUsedRatio,
 	} {
 		if err := reg.Register(c); err != nil {
 			return nil, err

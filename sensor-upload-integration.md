@@ -97,7 +97,7 @@ The sensor repeats the same request to poll until ops decides. No `Authorization
 
 | Response | Meaning | Sensor action |
 |---|---|---|
-| `202 Accepted` `{"status":"pending"}`, `Retry-After: 3600` | Pending ops approval | Keep buffering files; poll again after `Retry-After` seconds |
+| `202 Accepted` `{"status":"pending"}`, `Retry-After: 3600` | Pending approval (ops: `devicectl approve` or `POST /v1/devices/approve {"device_id":"…"}`) | Keep buffering files; poll again after `Retry-After` seconds |
 | `200 OK` with the token pair (below) | Approved | Save the pair (section 7.1), then delete the poll secret |
 | `400` `{"error":"invalid_request"}` | Malformed body or field | Fix; do not retry |
 | `403` `{"error":"device_not_active"}` | Rejected or revoked by ops | Stop; needs a technician |

@@ -4,8 +4,9 @@
 //	POST /v1/devices/register       any device asks to join; 202 while pending,
 //	                                200 token pair once approved
 //	POST /v1/devices/token/refresh  rotate the refresh token, get a new access token
+//	POST /v1/devices/approve        make a pending device active
 //
-// Both are unauthenticated JSON endpoints; errors are {"error":"<code>"}.
+// All are unauthenticated JSON endpoints; errors are {"error":"<code>"}.
 // Secrets and tokens are never logged.
 package deviceapi
 
@@ -32,12 +33,14 @@ const (
 	Prefix       = "/v1/devices/"
 	PathRegister = Prefix + "register"
 	PathRefresh  = Prefix + "token/refresh"
+	PathApprove  = Prefix + "approve"
 )
 
 // Error codes (the "error" field of error responses).
 const (
 	CodeInvalidRequest     = "invalid_request"
 	CodeDeviceNotActive    = "device_not_active"
+	CodeDeviceNotFound     = "device_not_found"
 	CodePollSecretMismatch = "poll_secret_mismatch"
 	CodeInvalidGrant       = "invalid_grant"
 	CodeRateLimited        = "rate_limited"
@@ -130,11 +133,12 @@ type pendingBody struct {
 
 // Outcomes of the state machine callbacks (never leave the package).
 var (
-	errNotActive    = errors.New("device not active")
-	errMismatch     = errors.New("poll secret mismatch")
-	errExpired      = errors.New("refresh family expired")
-	errRaced        = errors.New("refresh token changed concurrently")
-	errInvalidInput = errors.New("invalid request")
+	errNotActive     = errors.New("device not active")
+	errNotRegistered = errors.New("device not registered")
+	errMismatch      = errors.New("poll secret mismatch")
+	errExpired       = errors.New("refresh family expired")
+	errRaced         = errors.New("refresh token changed concurrently")
+	errInvalidInput  = errors.New("invalid request")
 )
 
 // NewHandler returns the handler for the routes under Prefix. Other paths
@@ -193,6 +197,8 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		serve, name = h.register, "device register"
 	case PathRefresh:
 		serve, name = h.refresh, "token refresh"
+	case PathApprove:
+		serve, name = h.approve, "device approve"
 	default:
 		writeError(w, http.StatusNotFound, CodeNotFound)
 		return
@@ -208,8 +214,11 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	res := serve(w, r.WithContext(ctx))
 	if h.cfg.Metrics != nil {
 		c := h.cfg.Metrics.DeviceRegister
-		if r.URL.Path == PathRefresh {
+		switch r.URL.Path {
+		case PathRefresh:
 			c = h.cfg.Metrics.TokenRefresh
+		case PathApprove:
+			c = h.cfg.Metrics.DeviceApprove
 		}
 		c.WithLabelValues(res.metric).Inc()
 	}

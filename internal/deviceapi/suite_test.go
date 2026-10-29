@@ -144,6 +144,24 @@ func (e *env) refresh(token string) *httptest.ResponseRecorder {
 	return e.do(http.MethodPost, PathRefresh, string(b), testRemoteAddr)
 }
 
+func (e *env) approve(device string) *httptest.ResponseRecorder {
+	b, _ := json.Marshal(ApproveRequest{DeviceID: device})
+	return e.do(http.MethodPost, PathApprove, string(b), testRemoteAddr)
+}
+
+// wantApproved checks a 200 approve answer for device.
+func wantApproved(t *testing.T, rec *httptest.ResponseRecorder, device string) {
+	t.Helper()
+	var b ApproveResponse
+	if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &b) != nil || b.DeviceID != device || b.Status != "active" {
+		t.Fatalf("approve = %d %s, want 200 %s active", rec.Code, rec.Body, device)
+	}
+}
+
+func (e *env) approveMetric(result string) float64 {
+	return testutil.ToFloat64(e.metrics.DeviceApprove.WithLabelValues(result))
+}
+
 func (e *env) ctx() context.Context {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	e.t.Cleanup(cancel)
@@ -263,6 +281,30 @@ func runSuite(t *testing.T, newStore func(t *testing.T) testStore) {
 			if err != nil || d.Status != db.DevicePending {
 				t.Fatalf("Get = %+v, %v; want pending", d, err)
 			}
+		}},
+		{"public approve", func(t *testing.T, e *env) {
+			dev, secret := e.newDevice(), newSecret(t)
+			wantError(t, e.approve(dev), http.StatusNotFound, CodeDeviceNotFound)
+			wantPending(t, e.register(dev, secret))
+			// Any letter case names the same device; the answer is lowercase.
+			wantApproved(t, e.approve(strings.ToUpper(dev)), dev)
+			if d, err := e.store.Get(e.ctx(), dev); err != nil || d.Status != db.DeviceActive || d.ApprovedAt == nil {
+				t.Fatalf("Get = %+v, %v; want active with approved_at", d, err)
+			}
+			e.tokens(e.register(dev, secret), dev)
+			wantApproved(t, e.approve(dev), dev) // already active: no-op
+			if e.approveMetric(obs.ApproveApproved) != 1 || e.approveMetric(obs.ApproveAlreadyActive) != 1 ||
+				e.approveMetric(obs.ApproveNotFound) != 1 {
+				t.Fatal("approve metrics")
+			}
+			// A revoked (or rejected) device is not re-activated publicly.
+			e.setStatus(dev, db.DeviceRevoked)
+			wantError(t, e.approve(dev), http.StatusForbidden, CodeDeviceNotActive)
+			if d, _ := e.store.Get(e.ctx(), dev); d.Status != db.DeviceRevoked {
+				t.Fatalf("status = %s, want revoked", d.Status)
+			}
+			wantError(t, e.approve("bad_id"), http.StatusBadRequest, CodeInvalidRequest)
+			wantError(t, e.do(http.MethodPost, PathApprove, `{`, testRemoteAddr), http.StatusBadRequest, CodeInvalidRequest)
 		}},
 		{"pending then mismatch", func(t *testing.T, e *env) {
 			dev, secret := e.newDevice(), newSecret(t)

@@ -172,6 +172,7 @@ Both are JSON over the TLS TCP listener and need no `Authorization` header.
 | Endpoint | Request | Responses |
 |---|---|---|
 | `POST /v1/devices/register` | `{"device_id","poll_secret","lat","lon","firmware"}` | `202` `{"status":"pending"}` + `Retry-After` (`REGISTER_RETRY_AFTER`, 1h); `200` token pair once approved; `400 invalid_request`; `403 device_not_active` (rejected/revoked); `409 poll_secret_mismatch`; `429 rate_limited` (per IP) |
+| `POST /v1/devices/approve` | `{"device_id":"…"}` | `200` `{"device_id":"wih-001","status":"active"}` (also when already active); `400 invalid_request`; `403 device_not_active` (rejected/revoked: only `devicectl approve` re-activates); `404 device_not_found` (never registered); `429 rate_limited` (per IP, shared with register); `503 temporarily_unavailable` |
 | `POST /v1/devices/token/refresh` | `{"refresh_token":"…"}` | `200` token pair; `400 invalid_request`; `401 invalid_grant` (unknown, reused, idle or max-age expired: register again); `403 device_not_active`; `503 temporarily_unavailable` |
 
 The token pair has the same shape from register, refresh and `devicectl issue`:
@@ -186,7 +187,8 @@ Error bodies are `{"error":"<code>"}`.
 - **Registration.** Any device may register with a valid device id
   (3-64 letters, digits or hyphens, starting with a letter or digit; case-insensitive (the server lowercases it, so `WIH-001` and `wih-001` are the same device)). The first call creates the device as
   `pending` and stores the poll secret's hash; ops see it in
-  `devicectl list -status pending` and approve or reject it. After `devicectl approve`, the same poll secret
+  `devicectl list -status pending` and approve it (`devicectl approve` or the
+  public `POST /v1/devices/approve`) or reject it. After approval, the same poll secret
   collects the pair, again and again until the refresh token is first used
   (so a lost `200` is harmless); then the poll secret is cleared. When the
   refresh family has expired, registering with a **new** poll secret puts the
@@ -942,6 +944,12 @@ Differences from `sensor-upload-integration.md` and the requirements:
   It reveals whether a file with a given hash is stored (and its size and
   completion time), nothing else. Each request is one indexed Postgres
   lookup, so a flood costs DB connections.
+- **`POST /v1/devices/approve` is unauthenticated.** Anyone who can reach
+  the server can approve any pending device, so approval no longer keeps
+  unknown devices out: whoever registers an id first and calls approve gets
+  tokens. It never re-activates a rejected or revoked device, and shares the
+  per-IP register rate limit (10/min). Restrict it at the proxy (IP
+  allow-list or an auth plugin on `/v1/devices/approve`) if that matters.
 - **`GET /files` is unauthenticated and not rate limited.** It discloses
   every completed upload's device id, filename, content type, size and
   times (not the file contents or storage key). Each request is one indexed
