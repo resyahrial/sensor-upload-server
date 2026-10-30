@@ -101,7 +101,7 @@ The sensor repeats the same request to poll until ops decides. No `Authorization
 | `200 OK` with the token pair (below) | Approved | Save the pair (section 7.1), then delete the poll secret |
 | `400` `{"error":"invalid_request"}` | Malformed body or field | Fix; do not retry |
 | `403` `{"error":"device_not_active"}` | Rejected or revoked by ops | Stop; needs a technician |
-| `409` `{"error":"poll_secret_mismatch"}` | A different poll secret is already registered for this device ID | Stop; needs a technician |
+| `409` `{"error":"poll_secret_mismatch"}` | A different poll secret is already registered for this device ID | Stop; needs a technician (ops can unregister the device ID: `POST /v1/devices/unregister`) |
 | `429` `{"error":"rate_limited"}` | Too many requests from this IP | Back off; honour `Retry-After` if present |
 
 **Token pair** (the same shape is returned by registration and by refresh):

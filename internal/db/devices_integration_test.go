@@ -152,9 +152,31 @@ func TestDevicesUpdateLifecycle(t *testing.T) {
 	if err := d.SetStatus(ctx, id, "bogus", now); err == nil {
 		t.Fatal("SetStatus accepted a bogus status")
 	}
-	// Rows are never deleted.
+	// Deleting the row: a family left set is an error; once retired, the
+	// row and family go and the retired hashes stay.
+	var famHash []byte
+	if err := d.Update(ctx, id, func(s *DeviceState) error {
+		s.Family = &RefreshFamily{CurrentHash: randHash(t), StartedAt: now, RefreshedAt: now}
+		famHash = s.Family.CurrentHash
+		return nil
+	}); err != nil {
+		t.Fatalf("Update family: %v", err)
+	}
 	if err := d.Update(ctx, id, func(s *DeviceState) error { s.Device = nil; return nil }); err == nil {
-		t.Fatal("Update deleted a device")
+		t.Fatal("Update deleted a device that kept its family")
+	}
+	if err := d.Update(ctx, id, func(s *DeviceState) error {
+		s.RetireFamily(RetireReset, now)
+		s.Device = nil
+		return nil
+	}); err != nil {
+		t.Fatalf("Update delete: %v", err)
+	}
+	if _, err := d.Get(ctx, id); !errors.Is(err, ErrDeviceNotFound) {
+		t.Fatalf("Get after delete = %v", err)
+	}
+	if m, err := d.FindRefreshHash(ctx, famHash); err != nil || !m.Retired || m.Reason != RetireReset {
+		t.Fatalf("FindRefreshHash after delete = %+v, %v; want retired reset", m, err)
 	}
 }
 

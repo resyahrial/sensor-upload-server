@@ -50,7 +50,10 @@ func (f *fakeStore) Update(_ context.Context, id string, fn func(s *db.DeviceSta
 	}
 	switch {
 	case s.Device == nil && hadDevice:
-		return errors.New("fake: delete device")
+		if s.Family != nil {
+			return errors.New("fake: refresh family without device")
+		}
+		delete(f.devices, id)
 	case s.Device != nil:
 		f.devices[id] = *s.Device
 	}

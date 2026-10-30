@@ -62,6 +62,15 @@ const (
 	ApproveError         = "error"          // 503
 )
 
+// Results for Metrics.DeviceUnregister (POST /v1/devices/unregister).
+const (
+	UnregisterDeleted     = "deleted"      // row deleted: 200
+	UnregisterNotFound    = "not_found"    // no row: 404
+	UnregisterInvalid     = "invalid"      // 400
+	UnregisterRateLimited = "rate_limited" // 429
+	UnregisterError       = "error"        // 503
+)
+
 // Reasons for Metrics.RetentionDeleted.
 const (
 	RetentionAge  = "age"  // completed longer than RETENTION_MAX_AGE ago
@@ -102,6 +111,9 @@ type Metrics struct {
 	// DeviceApprove counts public approve requests, by result (Approve*
 	// constants).
 	DeviceApprove *prometheus.CounterVec
+	// DeviceUnregister counts public unregister requests, by result
+	// (Unregister* constants).
+	DeviceUnregister *prometheus.CounterVec
 	// DiskUsedRatio is the used fraction (0..1) of DISK_PATH's
 	// filesystem at the last disk check.
 	DiskUsedRatio prometheus.Gauge
@@ -169,6 +181,9 @@ func NewMetrics(reg prometheus.Registerer) (*Metrics, error) {
 		DeviceApprove: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "device_approve_total", Help: "Public device approve requests, by result.",
 		}, []string{"result"}),
+		DeviceUnregister: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "device_unregister_total", Help: "Public device unregister requests, by result.",
+		}, []string{"result"}),
 		DiskUsedRatio: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "disk_used_ratio", Help: "Used fraction of the DISK_PATH filesystem (as df: used / (used + available)) at the last check.",
 		}),
@@ -176,7 +191,7 @@ func NewMetrics(reg prometheus.Registerer) (*Metrics, error) {
 	for _, c := range []prometheus.Collector{
 		m.Started, m.Completed, m.Failed, m.Resumes, m.BytesReceived,
 		m.ChunkBytes, m.Duration, m.FinalizeDuration, m.InProgress, m.GRPCStreamResets,
-		m.StagingOrphans, m.FileLookups, m.FileLists, m.RetentionDeleted, m.DeviceRegister, m.TokenRefresh, m.DeviceApprove, m.DiskUsedRatio,
+		m.StagingOrphans, m.FileLookups, m.FileLists, m.RetentionDeleted, m.DeviceRegister, m.TokenRefresh, m.DeviceApprove, m.DeviceUnregister, m.DiskUsedRatio,
 	} {
 		if err := reg.Register(c); err != nil {
 			return nil, err

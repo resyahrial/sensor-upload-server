@@ -86,9 +86,9 @@ type RetiredHash struct {
 type DeviceState struct {
 	// DeviceID is read-only.
 	DeviceID string
-	// Device is nil when there is no row; setting it creates the row.
-	// Setting an existing Device to nil is an error (rows are never
-	// deleted).
+	// Device is nil when there is no row; setting it creates the row,
+	// clearing it deletes the row (and its refresh family: clear Family
+	// too, retiring its hashes first with RetireFamily).
 	Device *Device
 	// Family is nil when there is none; setting it creates or replaces
 	// the family, clearing it deletes the family.
@@ -242,7 +242,14 @@ func persistState(ctx context.Context, tx pgx.Tx, s *DeviceState, hadDevice, had
 	dev := s.Device
 	switch {
 	case dev == nil && hadDevice:
-		return fmt.Errorf("device %q: devices rows cannot be deleted", s.DeviceID)
+		if s.Family != nil {
+			return fmt.Errorf("device %q: refresh family without device", s.DeviceID)
+		}
+		// ON DELETE CASCADE removes the refresh family.
+		if _, err := tx.Exec(ctx, `DELETE FROM devices WHERE device_id = $1`, s.DeviceID); err != nil {
+			return fmt.Errorf("delete device: %w", err)
+		}
+		hadFamily = false
 	case dev != nil && !hadDevice:
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO devices (device_id, status, poll_secret_hash, lat, lon, firmware,

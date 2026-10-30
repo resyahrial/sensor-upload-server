@@ -167,12 +167,13 @@ lookup endpoint needs no token.
 
 ### Device endpoints
 
-Both are JSON over the TLS TCP listener and need no `Authorization` header.
+All are JSON over the TLS TCP listener and need no `Authorization` header.
 
 | Endpoint | Request | Responses |
 |---|---|---|
 | `POST /v1/devices/register` | `{"device_id","poll_secret","lat","lon","firmware"}` | `202` `{"status":"pending"}` + `Retry-After` (`REGISTER_RETRY_AFTER`, 1h); `200` token pair once approved; `400 invalid_request`; `403 device_not_active` (rejected/revoked); `409 poll_secret_mismatch`; `429 rate_limited` (per IP) |
 | `POST /v1/devices/approve` | `{"device_id":"…"}` | `200` `{"device_id":"wih-001","status":"active"}` (also when already active); `400 invalid_request`; `403 device_not_active` (rejected/revoked: only `devicectl approve` re-activates); `404 device_not_found` (never registered); `429 rate_limited` (per IP, shared with register); `503 temporarily_unavailable` |
+| `POST /v1/devices/unregister` | `{"device_id":"…"}` | `200` `{"device_id":"wih-001","status":"unregistered"}` (row deleted in any state; the id can register again with any poll secret and lands pending; its refresh tokens get `401 invalid_grant`); `400 invalid_request`; `404 device_not_found`; `429 rate_limited` (per IP, shared with register); `503 temporarily_unavailable` |
 | `POST /v1/devices/token/refresh` | `{"refresh_token":"…"}` | `200` token pair; `400 invalid_request`; `401 invalid_grant` (unknown, reused, idle or max-age expired: register again); `403 device_not_active`; `503 temporarily_unavailable` |
 
 The token pair has the same shape from register, refresh and `devicectl issue`:
@@ -950,6 +951,13 @@ Differences from `sensor-upload-integration.md` and the requirements:
   tokens. It never re-activates a rejected or revoked device, and shares the
   per-IP register rate limit (10/min). Restrict it at the proxy (IP
   allow-list or an auth plugin on `/v1/devices/approve`) if that matters.
+- **`POST /v1/devices/unregister` is unauthenticated.** Anyone who can
+  reach the server can delete any device (active, rejected or revoked
+  included), cutting it off at its next refresh and clearing an ops
+  rejection; it can then be re-registered under a new poll secret by
+  whoever calls first. Access tokens already issued stay valid until they
+  expire; uploaded files are kept. Shares the register rate limit.
+  Restrict it at the proxy like approve.
 - **`GET /files` is unauthenticated and not rate limited.** It discloses
   every completed upload's device id, filename, content type, size and
   times (not the file contents or storage key). Each request is one indexed

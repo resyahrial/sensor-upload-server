@@ -5,6 +5,7 @@
 //	                                200 token pair once approved
 //	POST /v1/devices/token/refresh  rotate the refresh token, get a new access token
 //	POST /v1/devices/approve        make a pending device active
+//	POST /v1/devices/unregister     delete a device so its id can register afresh
 //
 // All are unauthenticated JSON endpoints; errors are {"error":"<code>"}.
 // Secrets and tokens are never logged.
@@ -30,10 +31,11 @@ import (
 
 // Routes.
 const (
-	Prefix       = "/v1/devices/"
-	PathRegister = Prefix + "register"
-	PathRefresh  = Prefix + "token/refresh"
-	PathApprove  = Prefix + "approve"
+	Prefix         = "/v1/devices/"
+	PathRegister   = Prefix + "register"
+	PathRefresh    = Prefix + "token/refresh"
+	PathApprove    = Prefix + "approve"
+	PathUnregister = Prefix + "unregister"
 )
 
 // Error codes (the "error" field of error responses).
@@ -199,6 +201,8 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		serve, name = h.refresh, "token refresh"
 	case PathApprove:
 		serve, name = h.approve, "device approve"
+	case PathUnregister:
+		serve, name = h.unregister, "device unregister"
 	default:
 		writeError(w, http.StatusNotFound, CodeNotFound)
 		return
@@ -219,6 +223,8 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			c = h.cfg.Metrics.TokenRefresh
 		case PathApprove:
 			c = h.cfg.Metrics.DeviceApprove
+		case PathUnregister:
+			c = h.cfg.Metrics.DeviceUnregister
 		}
 		c.WithLabelValues(res.metric).Inc()
 	}

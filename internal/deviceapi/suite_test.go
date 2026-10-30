@@ -10,6 +10,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -162,6 +163,24 @@ func (e *env) approveMetric(result string) float64 {
 	return testutil.ToFloat64(e.metrics.DeviceApprove.WithLabelValues(result))
 }
 
+func (e *env) unregister(device string) *httptest.ResponseRecorder {
+	b, _ := json.Marshal(UnregisterRequest{DeviceID: device})
+	return e.do(http.MethodPost, PathUnregister, string(b), testRemoteAddr)
+}
+
+// wantUnregistered checks a 200 unregister answer for device and that its
+// row is gone.
+func (e *env) wantUnregistered(rec *httptest.ResponseRecorder, device string) {
+	e.t.Helper()
+	var b UnregisterResponse
+	if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &b) != nil || b.DeviceID != device || b.Status != StatusUnregistered {
+		e.t.Fatalf("unregister = %d %s, want 200 %s unregistered", rec.Code, rec.Body, device)
+	}
+	if _, err := e.store.Get(e.ctx(), device); !errors.Is(err, db.ErrDeviceNotFound) {
+		e.t.Fatalf("Get after unregister = %v, want ErrDeviceNotFound", err)
+	}
+}
+
 func (e *env) ctx() context.Context {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	e.t.Cleanup(cancel)
@@ -305,6 +324,32 @@ func runSuite(t *testing.T, newStore func(t *testing.T) testStore) {
 			}
 			wantError(t, e.approve("bad_id"), http.StatusBadRequest, CodeInvalidRequest)
 			wantError(t, e.do(http.MethodPost, PathApprove, `{`, testRemoteAddr), http.StatusBadRequest, CodeInvalidRequest)
+		}},
+		{"public unregister", func(t *testing.T, e *env) {
+			wantError(t, e.unregister(e.newDevice()), http.StatusNotFound, CodeDeviceNotFound)
+			wantError(t, e.unregister("bad_id"), http.StatusBadRequest, CodeInvalidRequest)
+			wantError(t, e.do(http.MethodPost, PathUnregister, `{`, testRemoteAddr), http.StatusBadRequest, CodeInvalidRequest)
+
+			// An active device that has refreshed (poll secret cleared).
+			dev, _, tr := e.active()
+			tr = e.tokens(e.refresh(tr.RefreshToken), dev)
+			e.wantUnregistered(e.unregister(strings.ToUpper(dev)), dev)
+			// Its refresh token is dead: the sensor registers again.
+			wantError(t, e.refresh(tr.RefreshToken), http.StatusUnauthorized, CodeInvalidGrant)
+			// Any new poll secret is accepted, and the device is pending.
+			secret := newSecret(t)
+			wantPending(t, e.register(dev, secret))
+			wantError(t, e.unregister(dev+"x"), http.StatusNotFound, CodeDeviceNotFound)
+
+			// A rejected (or revoked) device can be unregistered too.
+			e.setStatus(dev, db.DeviceRejected)
+			e.wantUnregistered(e.unregister(dev), dev)
+			wantPending(t, e.register(dev, newSecret(t)))
+
+			m := func(r string) float64 { return testutil.ToFloat64(e.metrics.DeviceUnregister.WithLabelValues(r)) }
+			if m(obs.UnregisterDeleted) != 2 || m(obs.UnregisterNotFound) != 2 || m(obs.UnregisterInvalid) != 2 {
+				t.Fatal("unregister metrics")
+			}
 		}},
 		{"pending then mismatch", func(t *testing.T, e *env) {
 			dev, secret := e.newDevice(), newSecret(t)
