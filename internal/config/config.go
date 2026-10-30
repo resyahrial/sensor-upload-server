@@ -24,7 +24,7 @@ const (
 var DefaultContentTypes = []string{
 	"image/jpeg", "image/png", "image/webp", "image/avif",
 	"audio/wav", "audio/x-wav", "audio/flac", "audio/ogg", "audio/opus",
-	"video/mp4", "video/quicktime", "application/json",
+	"video/mp4", "video/quicktime", "application/json", "text/csv",
 }
 
 // S3 holds S3-compatible object storage settings.

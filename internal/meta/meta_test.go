@@ -238,7 +238,7 @@ func TestExtensionAndFinalKey(t *testing.T) {
 	want := map[string]string{
 		"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp", "image/avif": ".avif",
 		"audio/wav": ".wav", "audio/x-wav": ".wav", "audio/flac": ".flac", "audio/ogg": ".ogg",
-		"audio/opus": ".opus", "video/mp4": ".mp4", "video/quicktime": ".mov", "application/json": ".json",
+		"audio/opus": ".opus", "video/mp4": ".mp4", "video/quicktime": ".mov", "application/json": ".json", "text/csv": ".csv",
 		"application/x-custom": ".bin",
 	}
 	for ct, ext := range want {

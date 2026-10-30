@@ -381,6 +381,8 @@ func contentType(path string) string {
 		return "video/quicktime"
 	case ".json":
 		return "application/json"
+	case ".csv":
+		return "text/csv"
 	default:
 		return "application/octet-stream"
 	}

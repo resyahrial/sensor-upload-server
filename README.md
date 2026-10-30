@@ -392,7 +392,7 @@ All problems are reported together and the server exits 1.
 | `GRPC_ACK_EVERY_N` | `1` | gRPC ack frequency (every N-th chunk; the final chunk always) |
 | `QUIC_IDLE_TIMEOUT` | `60s` | QUIC max idle timeout |
 | `QUIC_KEEPALIVE` | `20s` | QUIC keep-alive period; must be shorter than `QUIC_IDLE_TIMEOUT` |
-| `CONTENT_TYPES` | FR-1a list | Comma-separated allow-list (default: `image/jpeg,image/png,image/webp,image/avif,audio/wav,audio/x-wav,audio/flac,audio/ogg,audio/opus,video/mp4,video/quicktime,application/json`) |
+| `CONTENT_TYPES` | FR-1a list | Comma-separated allow-list (default: `image/jpeg,image/png,image/webp,image/avif,audio/wav,audio/x-wav,audio/flac,audio/ogg,audio/opus,video/mp4,video/quicktime,application/json,text/csv`) |
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
 | `SHUTDOWN_TIMEOUT` | `30s` | Graceful drain budget for all listeners on SIGTERM |
 

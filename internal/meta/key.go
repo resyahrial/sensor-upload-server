@@ -16,6 +16,7 @@ var extensions = map[string]string{
 	"video/mp4":        ".mp4",
 	"video/quicktime":  ".mov",
 	"application/json": ".json",
+	"text/csv":         ".csv",
 }
 
 // Extension returns the file extension for contentType. Types added via

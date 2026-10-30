@@ -732,7 +732,7 @@ func TestHelpers(t *testing.T) {
 	for in, want := range map[string]string{
 		"a.JPG": "image/jpeg", "a.jpeg": "image/jpeg", "a.png": "image/png", "a.webp": "image/webp",
 		"a.avif": "image/avif", "a.wav": "audio/wav", "a.flac": "audio/flac", "a.ogg": "audio/ogg",
-		"a.opus": "audio/opus", "a.mp4": "video/mp4", "a.mov": "video/quicktime", "a.json": "application/json",
+		"a.opus": "audio/opus", "a.mp4": "video/mp4", "a.mov": "video/quicktime", "a.json": "application/json", "a.csv": "text/csv",
 		"a.bin": "application/octet-stream",
 	} {
 		if got := contentType(in); got != want {

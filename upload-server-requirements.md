@@ -145,7 +145,7 @@ Every upload carries these fields (tus: `Upload-Metadata`; gRPC: `InitRequest`).
 | `priority` | Required; integer 1–4 |
 | size | `Upload-Length` / `InitRequest.size`; 1 byte to `MAX_FILE_BYTES` |
 
-**FR-1a Content-type allow-list** (configurable): `image/jpeg`, `image/png`, `image/webp`, `image/avif`, `audio/wav`, `audio/x-wav`, `audio/flac`, `audio/ogg`, `audio/opus`, `video/mp4`, `video/quicktime`, `application/json`.
+**FR-1a Content-type allow-list** (configurable): `image/jpeg`, `image/png`, `image/webp`, `image/avif`, `audio/wav`, `audio/x-wav`, `audio/flac`, `audio/ogg`, `audio/opus`, `video/mp4`, `video/quicktime`, `application/json`, `text/csv`.
 
 Validation failures → tus `400` / gRPC `INVALID_ARGUMENT`, with a message naming the field.
 
